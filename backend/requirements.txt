@@ -1,0 +1,39 @@
+# backend/requirements.txt
+# FastAPI and dependencies
+fastapi
+uvicorn
+python-multipart
+python-jose[cryptography]==3.3.0
+python-dotenv
+pydantic
+
+# LlamaIndex
+llama-index==0.12.37
+llama-index-core==0.12.37
+llama-index-llms-bedrock==0.3.8
+llama-index-embeddings-bedrock==0.4.0
+llama-index-extractors-entity==0.3.1
+
+# AWS
+aiobotocore[boto3]>=2.18.0
+# boto3==1.34.0
+# botocore==1.34.0
+
+# Processing
+nest-asyncio
+tiktoken
+psutil
+
+# PDF processing
+pdfminer.six==20231228
+pymupdf
+
+# Utilities
+python-dateutil==2.8.2
+requests
+
+# Development
+pytest
+pytest-asyncio
+black
+flake8
