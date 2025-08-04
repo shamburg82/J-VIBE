@@ -207,3 +207,108 @@ class SystemStats(BaseModel):
     total_queries: int = Field(..., description="Total queries processed")
     average_processing_time_seconds: float = Field(..., description="Average document processing time")
     uptime_seconds: int = Field(..., description="System uptime in seconds")
+
+
+# Chat Models
+class MessageRole(str, Enum):
+    USER = "user"
+    ASSISTANT = "assistant"
+    SYSTEM = "system"
+
+
+class ChatMessage(BaseModel):
+    """Individual message in a chat conversation."""
+    id: str = Field(default_factory=lambda: str(uuid.uuid4()), description="Unique message ID")
+    role: MessageRole = Field(..., description="Message role (user/assistant/system)")
+    content: str = Field(..., description="Message content")
+    timestamp: datetime = Field(default_factory=datetime.now, description="Message timestamp")
+    
+    # Query-specific metadata (for assistant messages)
+    sources_used: List[QuerySource] = Field(default_factory=list, description="Sources used in response")
+    chunks_retrieved: int = Field(default=0, description="Number of chunks retrieved")
+    processing_time_ms: int = Field(default=0, description="Processing time in milliseconds")
+    
+    # Additional metadata
+    metadata: Dict[str, Any] = Field(default_factory=dict, description="Additional message metadata")
+
+
+class ChatSession(BaseModel):
+    """Chat session containing conversation history."""
+    id: str = Field(default_factory=lambda: str(uuid.uuid4()), description="Unique session ID")
+    document_id: str = Field(..., description="Document ID for this chat session")
+    title: str = Field(default="New Chat", description="Chat session title")
+    created_at: datetime = Field(default_factory=datetime.now, description="Session creation time")
+    updated_at: datetime = Field(default_factory=datetime.now, description="Last update time")
+    
+    messages: List[ChatMessage] = Field(default_factory=list, description="Conversation messages")
+    
+    # Session settings
+    context_window: int = Field(default=10, description="Number of previous messages to include in context")
+    max_tokens: int = Field(default=4096, description="Maximum tokens for responses")
+    temperature: float = Field(default=0.2, description="Response creativity (0.0-1.0)")
+    
+    # Session metadata
+    total_queries: int = Field(default=0, description="Total queries in this session")
+    metadata: Dict[str, Any] = Field(default_factory=dict, description="Additional session metadata")
+
+
+class ChatRequest(BaseModel):
+    """Request for sending a message in a chat session."""
+    session_id: str = Field(..., description="Chat session ID")
+    message: str = Field(..., description="User message", min_length=1)
+    
+    # Query parameters
+    top_k: int = Field(default=15, description="Number of chunks to retrieve", ge=1, le=50)
+    min_confidence: float = Field(default=0.4, description="Minimum confidence threshold", ge=0.0, le=1.0)
+    include_context: bool = Field(default=True, description="Whether to include conversation context")
+
+
+class ChatResponse(BaseModel):
+    """Response from chat query."""
+    session_id: str = Field(..., description="Chat session ID")
+    message_id: str = Field(..., description="ID of the assistant's response message")
+    response: str = Field(..., description="Assistant's response")
+    
+    # Query metadata
+    sources_used: List[QuerySource] = Field(default_factory=list, description="Sources used in response")
+    chunks_retrieved: int = Field(..., description="Number of chunks retrieved")
+    processing_time_ms: int = Field(..., description="Processing time in milliseconds")
+    
+    # Context information
+    context_messages_used: int = Field(..., description="Number of previous messages included in context")
+    total_messages_in_session: int = Field(..., description="Total messages in session after this response")
+
+
+class NewChatRequest(BaseModel):
+    """Request to create a new chat session."""
+    document_id: str = Field(..., description="Document ID to chat about")
+    title: Optional[str] = Field(None, description="Optional chat title")
+    context_window: int = Field(default=10, description="Number of previous messages to include", ge=1, le=50)
+    system_message: Optional[str] = Field(None, description="Optional system message to set context")
+
+
+class ChatSessionSummary(BaseModel):
+    """Summary information about a chat session."""
+    id: str = Field(..., description="Session ID")
+    document_id: str = Field(..., description="Document ID")
+    title: str = Field(..., description="Session title")
+    created_at: datetime = Field(..., description="Creation time")
+    updated_at: datetime = Field(..., description="Last update time")
+    total_messages: int = Field(..., description="Number of messages in session")
+    total_queries: int = Field(..., description="Number of user queries")
+    last_message_preview: Optional[str] = Field(None, description="Preview of last message")
+
+
+class UpdateChatRequest(BaseModel):
+    """Request to update chat session settings."""
+    title: Optional[str] = Field(None, description="New session title")
+    context_window: Optional[int] = Field(None, description="New context window size", ge=1, le=50)
+
+
+class StreamingChatChunk(BaseModel):
+    """Streaming chat response chunk."""
+    session_id: str = Field(..., description="Chat session ID")
+    message_id: str = Field(..., description="Message ID being streamed")
+    type: str = Field(..., description="Chunk type: 'content', 'sources', 'complete', 'error'")
+    data: Any = Field(..., description="Chunk data")
+    timestamp: datetime = Field(default_factory=datetime.now, description="Chunk timestamp")
