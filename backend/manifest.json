@@ -1,0 +1,14 @@
+{
+  "version": 1,
+  "metadata": {
+    "appmode": "api",
+    "entrypoint": "app.main:app"
+  },
+  "python": {
+    "version": "3.11",
+    "package_manager": {
+      "name": "pip",
+      "version": "23.0"
+    }
+  }
+}
