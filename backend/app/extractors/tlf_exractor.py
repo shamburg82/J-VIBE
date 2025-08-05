@@ -1,4 +1,3 @@
-# backend/app/extractors/tlf_exractor.py
 from llama_index.core.extractors import BaseExtractor
 from llama_index.core.schema import BaseNode
 import re
@@ -183,11 +182,27 @@ CONFIDENCE: [0.0 to 1.0]
         """Transform nodes by adding TLF metadata."""
         print(f"TLFExtractor.__call__ processing {len(nodes)} nodes")
         
+        # Validate input - ensure all items are BaseNode objects
+        validated_nodes = []
+        for i, node in enumerate(nodes):
+            if isinstance(node, str):
+                # Convert string to TextNode
+                text_node = TextNode(text=node, id_=f"node_{i}")
+                validated_nodes.append(text_node)
+                logging.warning(f"Converted string to TextNode at index {i}")
+            elif isinstance(node, BaseNode):
+                validated_nodes.append(node)
+            else:
+                logging.error(f"Invalid node type at index {i}: {type(node)}")
+                # Create a TextNode from string representation
+                text_node = TextNode(text=str(node), id_=f"node_{i}")
+                validated_nodes.append(text_node)
+        
         # Extract metadata for all nodes
-        metadata_list = self.extract(nodes)
+        metadata_list = self.extract(validated_nodes)
         
         # Apply metadata to each node
-        for i, (node, metadata) in enumerate(zip(nodes, metadata_list)):
+        for i, (node, metadata) in enumerate(zip(validated_nodes, metadata_list)):
             # Update node metadata with extracted TLF metadata
             node.metadata.update(metadata)
             
@@ -195,7 +210,7 @@ CONFIDENCE: [0.0 to 1.0]
             if metadata.get('title'):
                 print(f"  Node {i}: Setting title to '{metadata['title']}'")
         
-        return nodes
+        return validated_nodes
         
     async def aextract(self, nodes: List[BaseNode]) -> List[Dict[str, Any]]:
         """Async extraction method for TLF outputs with bundle optimization."""
