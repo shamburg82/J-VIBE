@@ -15,6 +15,7 @@ from llama_index.core import SimpleDirectoryReader
 from llama_index.core.node_parser import TokenTextSplitter
 from llama_index.core.ingestion import IngestionPipeline
 from llama_index.core.extractors import QuestionsAnsweredExtractor, SummaryExtractor, KeywordExtractor
+from llama_index.core.schema import TextNode
 
 from ..extractors.tlf_extractor import TLFExtractor
 from ..core.models import ProcessingStatus, DocumentInfo, DocumentSummary, ProcessingStatusEnum
@@ -218,45 +219,41 @@ class DocumentService:
             
             logger.info(f"Starting pipeline processing with {len(transformations)} transformations")
             
-            # Process documents
-            doc_nodes = await asyncio.get_event_loop().run_in_executor(
-                None, pipeline.run, documents
-            )
+            # Process documents with better error handling
+            try:
+                doc_nodes = await asyncio.get_event_loop().run_in_executor(
+                    None, pipeline.run, documents
+                )
+                logger.info(f"Pipeline completed. Generated {len(doc_nodes)} nodes")
+            except Exception as pipeline_error:
+                logger.error(f"Pipeline processing failed: {pipeline_error}")
+                # Try manual processing as fallback
+                doc_nodes = await self._manual_document_processing(documents)
             
-            logger.info(f"Pipeline completed. Generated {len(doc_nodes)} nodes")
-            
-            # Debug: Check if nodes have content
-            if doc_nodes:
-                sample_node = doc_nodes[0]
-                logger.info(f"Sample node text length: {len(sample_node.text)}")
-                logger.info(f"Sample node metadata keys: {list(sample_node.metadata.keys())}")
-            else:
-                # Try manual text splitting to debug
-                logger.warning("Pipeline produced no nodes. Attempting manual debugging...")
-                
-                try:
-                    # Test text splitter directly
-                    manual_nodes = []
-                    for doc in documents:
-                        if doc.text and doc.text.strip():
-                            split_nodes = self.text_splitter.split_text(doc.text)
-                            manual_nodes.extend(split_nodes)
-                    
-                    logger.info(f"Manual text splitting produced {len(manual_nodes)} nodes")
-                    
-                    if manual_nodes:
-                        # Use manual nodes
-                        doc_nodes = manual_nodes
-                        logger.info("Using manually split nodes")
-                    else:
-                        raise ValueError("Text splitter produced no nodes even with manual splitting")
-                        
-                except Exception as manual_error:
-                    logger.error(f"Manual text splitting failed: {manual_error}")
-                    raise ValueError(f"Text chunking failed: {manual_error}")
+            # FIXED: Validate nodes and handle empty results
+            if not doc_nodes:
+                logger.warning("No nodes generated from pipeline, attempting manual processing")
+                doc_nodes = await self._manual_document_processing(documents)
             
             if not doc_nodes:
                 raise ValueError("No text chunks were created from the PDF content")
+            
+            # Ensure all nodes are proper BaseNode objects
+            validated_nodes = []
+            for i, node in enumerate(doc_nodes):
+                if isinstance(node, str):
+                    # Convert string to TextNode
+                    text_node = TextNode(text=node, id_=f"node_{i}_{document_id}")
+                    validated_nodes.append(text_node)
+                elif hasattr(node, 'text') or hasattr(node, 'get_content'):
+                    validated_nodes.append(node)
+                else:
+                    # Create TextNode from string representation
+                    text_node = TextNode(text=str(node), id_=f"node_{i}_{document_id}")
+                    validated_nodes.append(text_node)
+            
+            doc_nodes = validated_nodes
+            logger.info(f"Validated {len(doc_nodes)} nodes")
             
             await self._update_status(
                 document_id, ProcessingStatusEnum.EXTRACTING_TLF_METADATA, 70,
@@ -264,18 +261,39 @@ class DocumentService:
                 total_chunks=len(doc_nodes)
             )
             
-            # Apply additional extractors
-            for extractor in self.extractors:
-                extracted_metadata = extractor.extract(doc_nodes)
-                for node, metadata in zip(doc_nodes, extracted_metadata):
-                    node.metadata.update(metadata)
+            # FIXED: Apply TLF extractor manually if not already applied
+            try:
+                # Reset extractor context for new document
+                self.tlf_extractor.reset_context()
+                
+                # Apply TLF extraction
+                doc_nodes = self.tlf_extractor(doc_nodes)
+                logger.info(f"TLF extraction completed on {len(doc_nodes)} nodes")
+                
+                # Apply additional extractors
+                for extractor in self.extractors[1:]:  # Skip TLF extractor as it's already applied
+                    try:
+                        if hasattr(extractor, 'extract'):
+                            extracted_metadata = extractor.extract(doc_nodes)
+                            for node, metadata in zip(doc_nodes, extracted_metadata):
+                                if hasattr(node, 'metadata'):
+                                    node.metadata.update(metadata)
+                        logger.info(f"Applied {extractor.__class__.__name__}")
+                    except Exception as e:
+                        logger.warning(f"Extractor {extractor.__class__.__name__} failed: {e}")
+                        continue
+                        
+            except Exception as extraction_error:
+                logger.error(f"Metadata extraction failed: {extraction_error}")
+                # Continue without metadata extraction
+                logger.warning("Continuing without full metadata extraction")
             
             await self._update_status(
                 document_id, ProcessingStatusEnum.BUILDING_INDEX, 85,
                 "Building vector index..."
             )
                 
-                # Store in vector index
+            # Store in vector index
             index_id = await self.storage_service.create_index(document_id, doc_nodes)
             
             # Count TLF outputs found
@@ -321,6 +339,43 @@ class DocumentService:
                 f"Processing failed: {str(e)}",
                 error_message=str(e)
             )
+
+    async def _manual_document_processing(self, documents) -> List:
+        """Manual fallback processing when pipeline fails."""
+        logger.info("Starting manual document processing fallback")
+        
+        try:
+            # Step 1: Manual text splitting
+            all_text_chunks = []
+            for doc in documents:
+                if doc.text and doc.text.strip():
+                    # Use text splitter to create chunks
+                    chunks = self.text_splitter.split_text(doc.text)
+                    all_text_chunks.extend(chunks)
+            
+            logger.info(f"Manual text splitting produced {len(all_text_chunks)} chunks")
+            
+            if not all_text_chunks:
+                return []
+            
+            # Step 2: Convert to TextNode objects
+            text_nodes = []
+            for i, chunk in enumerate(all_text_chunks):
+                if isinstance(chunk, str) and chunk.strip():
+                    node = TextNode(
+                        text=chunk,
+                        id_=f"manual_node_{i}",
+                        metadata={"source": "manual_processing"}
+                    )
+                    text_nodes.append(node)
+            
+            logger.info(f"Created {len(text_nodes)} TextNode objects")
+            return text_nodes
+            
+        except Exception as e:
+            logger.error(f"Manual document processing failed: {e}")
+            return []
+
 
     async def _store_file_permanently(
         self,
@@ -500,7 +555,7 @@ class DocumentService:
         total = 0
         
         for node in nodes:
-            metadata = node.metadata
+            metadata = getattr(node, 'metadata', {})
             
             # Count TLF types
             tlf_type = metadata.get('tlf_type')
