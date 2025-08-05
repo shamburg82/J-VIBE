@@ -125,18 +125,84 @@ Analysis:"""
             prompt = self.clinical_prompt_template.format(query=request.query, context=context)
             
             # Stream LLM response
-            if hasattr(self.llm, 'astream_complete'):
-                async for chunk in self.llm.astream_complete(prompt):
-                    yield StreamingQueryChunk(
-                        type="content",
-                        data=str(chunk.delta)
-                    )
-            else:
+            # FIXED: Proper async streaming handling
+            try:
+                # Check if the LLM supports streaming
+                if hasattr(self.llm, 'astream_complete'):
+                    logger.info("Using LLM async streaming")
+                    
+                    # Get the streaming response
+                    stream_response = self.llm.astream_complete(prompt)
+                    
+                    # Check if it's a coroutine that needs to be awaited first
+                    if hasattr(stream_response, '__await__'):
+                        # This is a coroutine, await it first
+                        stream_response = await stream_response
+                    
+                    # Now check if it's an async iterator
+                    if hasattr(stream_response, '__aiter__'):
+                        async for chunk in stream_response:
+                            # Handle different chunk formats
+                            if hasattr(chunk, 'delta'):
+                                content = str(chunk.delta)
+                            elif hasattr(chunk, 'text'):
+                                content = str(chunk.text)
+                            else:
+                                content = str(chunk)
+                            
+                            if content:  # Only yield non-empty content
+                                yield StreamingQueryChunk(
+                                    type="content",
+                                    data=content
+                                )
+                    else:
+                        # Not an async iterator, treat as single response
+                        response_text = str(stream_response)
+                        yield StreamingQueryChunk(
+                            type="content",
+                            data=response_text
+                        )
+                        
+                elif hasattr(self.llm, 'stream_complete'):
+                    # Fallback to sync streaming
+                    logger.info("Using LLM sync streaming")
+                    stream_response = self.llm.stream_complete(prompt)
+                    
+                    for chunk in stream_response:
+                        content = str(chunk.delta) if hasattr(chunk, 'delta') else str(chunk)
+                        if content:
+                            yield StreamingQueryChunk(
+                                type="content",
+                                data=content
+                            )
+                else:
+                    # No streaming support, use regular completion
+                    logger.info("LLM doesn't support streaming, using regular completion")
+                    response = await self._query_llm(request.query, context)
+                    
+                    # Simulate streaming by breaking response into chunks
+                    words = response.split()
+                    chunk_size = 10  # Send 10 words at a time
+                    
+                    for i in range(0, len(words), chunk_size):
+                        chunk_words = words[i:i + chunk_size]
+                        chunk_text = ' '.join(chunk_words)
+                        
+                        yield StreamingQueryChunk(
+                            type="content",
+                            data=chunk_text + (' ' if i + chunk_size < len(words) else '')
+                        )
+                        
+                        # Small delay to simulate streaming
+                        await asyncio.sleep(0.1)
+                        
+            except Exception as stream_error:
+                logger.error(f"Streaming error: {stream_error}")
                 # Fallback to non-streaming
-                response = await self.llm.acomplete(prompt)
+                response = await self._query_llm(request.query, context)
                 yield StreamingQueryChunk(
                     type="content",
-                    data=str(response)
+                    data=response
                 )
             
             # Send sources
