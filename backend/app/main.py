@@ -12,12 +12,13 @@ from contextlib import asynccontextmanager
 import os
 from pathlib import Path
 
-from .api.routes import documents, queries, health
+from .api.routes import documents, queries, health, chat
 from .core.bedrock_setup import configure_bedrock_llm
 from .core.models import QueryRequest, QueryResponse, ProcessingStatus, DocumentInfo
 from .services.document_service import DocumentService
 from .services.query_service import QueryService
 from .services.storage_service import StorageService
+from .services.chat_service import ChatService
 
 # Configure logging
 logging.basicConfig(level=logging.INFO)
@@ -27,6 +28,7 @@ logger = logging.getLogger(__name__)
 document_service: Optional[DocumentService] = None
 query_service: Optional[QueryService] = None
 storage_service: Optional[StorageService] = None
+chat_service: Optional[ChatService] = None
 
 
 @asynccontextmanager
@@ -74,7 +76,7 @@ async def lifespan(app: FastAPI):
             raise Exception("Failed to initialize Bedrock LLM")
         
         # Initialize services with config
-        global document_service, query_service, storage_service
+        global document_service, query_service, storage_service, chat_service
         
         storage_service = StorageService()
         document_service = DocumentService(
@@ -83,6 +85,13 @@ async def lifespan(app: FastAPI):
             config=config if is_posit else None
         )
         query_service = QueryService(llm=llm, storage_service=storage_service)
+        
+        # Initialize chat service
+        chat_service = ChatService(
+            llm=llm, 
+            storage_service=storage_service, 
+            query_service=query_service
+        )
         
         logger.info("✅ All services initialized successfully")
         if config and hasattr(config, 'get_storage_path'):
@@ -123,6 +132,7 @@ app.add_middleware(
 app.include_router(health.router, prefix="/api/v1/health", tags=["health"])
 app.include_router(documents.router, prefix="/api/v1/documents", tags=["documents"])
 app.include_router(queries.router, prefix="/api/v1/queries", tags=["queries"])
+app.include_router(chat.router, prefix="/api/v1/chat", tags=["chat"]) 
 
 
 # Root endpoint
@@ -163,6 +173,100 @@ def get_storage_service() -> StorageService:
     if storage_service is None:
         raise HTTPException(status_code=503, detail="Storage service not initialized")
     return storage_service
+
+
+def get_chat_service() -> ChatService:
+    """NEW: Dependency to get chat service."""
+    if chat_service is None:
+        raise HTTPException(status_code=503, detail="Chat service not initialized")
+    return chat_service
+
+
+# Additional convenience endpoints for chat integration
+
+@app.get("/api/v1/document/{document_id}/chat-ready")
+async def check_document_chat_ready(document_id: str):
+    """Check if a document is ready for chat (processed and indexed)."""
+    
+    try:
+        # Check if document exists and is processed
+        doc_info = await document_service.get_document_info(document_id)
+        if not doc_info:
+            raise HTTPException(status_code=404, detail="Document not found")
+        
+        if doc_info.status != "completed":
+            return {
+                "chat_ready": False,
+                "status": doc_info.status,
+                "message": f"Document is still being processed (status: {doc_info.status})"
+            }
+        
+        # Check if vector index exists
+        vector_index = await storage_service.get_index(document_id)
+        if not vector_index:
+            return {
+                "chat_ready": False,
+                "status": "no_index",
+                "message": "Document processed but vector index not available"
+            }
+        
+        # Get available sources for context
+        sources = await query_service.get_available_sources(document_id)
+        
+        return {
+            "chat_ready": True,
+            "status": "ready",
+            "message": "Document is ready for chat",
+            "document_info": {
+                "filename": doc_info.filename,
+                "total_pages": doc_info.total_pages,
+                "total_chunks": doc_info.total_chunks,
+                "tlf_outputs_found": doc_info.tlf_outputs_found
+            },
+            "available_sources": sources
+        }
+        
+    except Exception as e:
+        logger.error(f"Error checking chat readiness for document {document_id}: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get("/api/v1/chat/examples")
+async def get_chat_examples():
+    """Get example chat queries for different types of clinical data."""
+    
+    return {
+        "examples": {
+            "demographics": [
+                "What are the baseline demographics of the study participants?",
+                "How many patients were enrolled in each treatment group?",
+                "What was the average age of participants?"
+            ],
+            "safety": [
+                "What were the most common adverse events?",
+                "Were there any serious adverse events related to treatment?",
+                "How did the safety profile compare between treatment groups?"
+            ],
+            "efficacy": [
+                "What were the primary efficacy results?",
+                "Did the treatment show statistical significance?",
+                "How did efficacy compare between different dose levels?"
+            ],
+            "follow_up": [
+                "Can you explain that in more detail?",
+                "What about the secondary endpoints?",
+                "How does this compare to what you mentioned earlier?",
+                "Were there any subgroup analyses?"
+            ]
+        },
+        "tips": [
+            "Ask follow-up questions to get more detailed information",
+            "Reference specific table numbers if you know them",
+            "Ask for comparisons between treatment groups",
+            "Request clarification on clinical terminology",
+            "Ask about statistical significance and confidence intervals"
+        ]
+    }
 
 
 if __name__ == "__main__":
