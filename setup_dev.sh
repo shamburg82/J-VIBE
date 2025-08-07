@@ -1,6 +1,6 @@
 #!/bin/bash
 
-# Development setup script for TLF Analyzer on Posit Workbench
+# Simplified development setup script for JazzVIBE on Posit Workbench
 
 echo "🚀 Setting up JazzVIBE for Posit Workbench development..."
 
@@ -17,56 +17,114 @@ fi
 export PORT=8000
 export DEVELOPMENT_MODE=true
 
-# Function to start backend
-start_backend() {
-    echo "🔧 Starting FastAPI backend..."
-    cd backend
-    
-    if [ "$WORKBENCH" = true ]; then
-        # Option 1: Use the start.py script
-        echo "📁 Using start.py script for Workbench"
-        python start.py
-    else
-        # Option 2: Use uvicorn directly with app.py
-        echo "📁 Using uvicorn directly for local development"  
-        python -m uvicorn main:app --host 0.0.0.0 --port $PORT --reload
-    fi
-}
-
-# Function to start frontend
-start_frontend() {
-    echo "⚛️  Starting React frontend..."
-    cd frontend
-    
-    if [ "$WORKBENCH" = true ]; then
-        echo "ℹ️  In Workbench mode, frontend is served by the backend after building."
-        echo "ℹ️  No separate frontend server needed."
-    else
-        # Local development with hot reload
-        npm start
-    fi
-}
-
-# Function to build everything
-build_all() {
-    echo "🏗️  Building React frontend..."
+# Function to build frontend with fallback options
+build_frontend_with_fallbacks() {
+    echo "🏗️  Building React frontend with fallback strategies..."
     cd frontend
     
     # Install dependencies if node_modules doesn't exist
     if [ ! -d "node_modules" ]; then
         echo "📦 Installing frontend dependencies..."
-        npm install
+        
+        # Use npm ci for faster, more reliable installs in CI environments
+        if [ -f "package-lock.json" ]; then
+            npm ci --prefer-offline --no-audit --silent
+        else
+            npm install --prefer-offline --no-audit --silent
+        fi
     fi
     
+    # Strategy 1: Try normal build first
+    echo "🔧 Attempting normal build..."
     if [ "$WORKBENCH" = true ]; then
-        npm run build-workbench
-    else
-        npm run build
+        export NODE_OPTIONS="--max-old-space-size=3072"
+        if npm run build-workbench; then
+            echo "✅ Normal build succeeded!"
+            cd ..
+            return 0
+        fi
+        echo "❌ Normal build failed, trying with reduced memory..."
     fi
+    
+    # Strategy 2: Reduced memory build
+    echo "🔧 Attempting reduced memory build..."
+    export NODE_OPTIONS="--max-old-space-size=2048"
+    export LOW_MEMORY_BUILD=true
+    if npm run build-workbench-minimal; then
+        echo "✅ Reduced memory build succeeded!"
+        cd ..
+        return 0
+    fi
+    echo "❌ Reduced memory build failed, trying minimal build..."
+    
+    # Strategy 3: Minimal build with even less memory
+    echo "🔧 Attempting minimal build..."
+    export NODE_OPTIONS="--max-old-space-size=1024"
+    export DISABLE_ESLINT_PLUGIN=true
+    
+    # Create a temporary minimal build script
+    cat > temp_build.js << 'EOF'
+const { execSync } = require('child_process');
+process.env.GENERATE_SOURCEMAP = 'false';
+process.env.PUBLIC_URL = '.';
+process.env.CI = 'true'; // Disable interactive mode
+execSync('npx react-scripts build', { stdio: 'inherit' });
+EOF
+    
+    if node temp_build.js; then
+        echo "✅ Minimal build succeeded!"
+        rm -f temp_build.js
+        cd ..
+        return 0
+    fi
+    
+    # Strategy 4: Ultra minimal - build without optimizations
+    echo "🔧 Attempting ultra-minimal build..."
+    rm -f temp_build.js
+    export NODE_OPTIONS="--max-old-space-size=512"
+    
+    # Try building with webpack directly (bypasses some CRA overhead)
+    if npx webpack --mode production --entry ./src/index.js --output-path ./build --output-filename static/js/[name].js; then
+        echo "✅ Ultra-minimal build succeeded!"
+        cd ..
+        return 0
+    fi
+    
+    echo "❌ All build strategies failed!"
     cd ..
-    echo "✅ Build complete!"
+    return 1
 }
 
+# Function to start backend only (simplified)
+start_backend_simple() {
+    echo "🔧 Starting FastAPI backend..."
+    cd backend
+    
+    # Use the simplified main.py that doesn't set root_path in FastAPI config
+    # This avoids the URL construction issues we were seeing
+    
+    if [ "$WORKBENCH" = true ]; then
+        echo "📁 Starting for Workbench environment (no root_path config)"
+        python -m uvicorn main:app --host 0.0.0.0 --port $PORT --log-level info
+    else
+        echo "📁 Starting for local development with reload"  
+        python -m uvicorn main:app --host 0.0.0.0 --port $PORT --reload --log-level info
+    fi
+}
+
+# Function to start frontend dev server (local only)
+start_frontend_dev() {
+    if [ "$WORKBENCH" = false ]; then
+        echo "⚛️  Starting React development server..."
+        cd frontend
+        npm start &
+        FRONTEND_PID=$!
+        echo "Frontend dev server PID: $FRONTEND_PID"
+        cd ..
+    else
+        echo "ℹ️  In Workbench mode, frontend is served by the backend after building."
+    fi
+}
 
 # Function to clean build
 clean_build() {
@@ -75,106 +133,140 @@ clean_build() {
     rm -rf build/
     rm -rf node_modules/.cache/
     echo "✅ Clean complete!"
-}
-
-# Function for complete Workbench setup
-workbench_setup() {
-    echo "🔧 Workbench Complete Setup:"
-    echo "  1. Installing dependencies..."
-    echo "  2. Building React app..."
-    echo "  3. Starting integrated server..."
-    
-    # Step 1: Install frontend dependencies
-    cd frontend
-    if [ ! -d "node_modules" ]; then
-        echo "📦 Installing frontend dependencies..."
-        npm install
-    fi
-    
-    # Step 2: Build frontend
-    echo "🏗️  Building React app for Workbench..."
-    npm run build-workbench
-    
-    # Step 3: Start backend (which serves the built frontend)
-    cd ../backend
-    echo "🚀 Starting FastAPI backend (serves built React app)..."
-    python start.py
-}
-
-# Function for complete local setup
-local_setup() {
-    echo "🔧 Local Development Setup:"
-    echo "  1. Installing dependencies..."
-    echo "  2. Starting backend..."
-    echo "  3. Starting frontend with hot reload..."
-    
-    # Step 1: Install dependencies
-    cd frontend
-    if [ ! -d "node_modules" ]; then
-        echo "📦 Installing frontend dependencies..."
-        npm install
-    fi
     cd ..
-    
-    # Step 2 & 3: Start both servers
-    echo "🚀 Starting backend server..."
-    start_backend &
-    BACKEND_PID=$!
-    
-    sleep 3
-    
-    echo "🚀 Starting frontend development server..."
-    start_frontend &
-    FRONTEND_PID=$!
-    
-    # Wait for both processes
-    echo "✅ Both servers running. Press Ctrl+C to stop."
-    wait $BACKEND_PID $FRONTEND_PID
 }
 
+# Function to check if build exists and is recent
+check_build() {
+    if [ -d "frontend/build" ]; then
+        # Check if build is less than 1 hour old
+        if [ $(find frontend/build -maxdepth 0 -mmin -60 2>/dev/null | wc -l) -eq 1 ]; then
+            echo "✅ Recent build found (less than 1 hour old)"
+            return 0
+        else
+            echo "⚠️  Build exists but is older than 1 hour"
+            return 1
+        fi
+    else
+        echo "❌ No build found"
+        return 1
+    fi
+}
+
+# Main execution based on argument
 case "$1" in
-    "backend")
-        start_backend
-        ;;
-    "frontend")
-        start_frontend
-        ;;
     "build")
-        build_all
+        build_frontend_with_fallbacks
         ;;
     "clean")
         clean_build
         ;;
     "rebuild")
         clean_build
-        build_all
+        build_frontend_with_fallbacks
         ;;
-    "setup"|"both"|"")
-        # Complete setup based on environment
+    "backend")
+        # Check if build exists for production serving
         if [ "$WORKBENCH" = true ]; then
-            workbench_setup
+            if ! check_build; then
+                echo "🔨 Building frontend first..."
+                build_frontend_with_fallbacks
+            fi
+        fi
+        start_backend_simple
+        ;;
+    "dev"|"local")
+        # Local development with both servers
+        if [ "$WORKBENCH" = true ]; then
+            echo "⚠️  Warning: 'dev' mode requested but in Workbench environment"
+            echo "    Use 'backend' instead for Workbench, or run locally"
+            exit 1
+        fi
+        
+        # Start backend
+        start_backend_simple &
+        BACKEND_PID=$!
+        echo "Backend PID: $BACKEND_PID"
+        
+        sleep 3
+        
+        # Start frontend dev server
+        start_frontend_dev
+        
+        # Wait for processes
+        echo "✅ Both servers running. Press Ctrl+C to stop."
+        wait $BACKEND_PID $FRONTEND_PID
+        ;;
+    ""|"start")
+        # Default: Smart startup based on environment
+        if [ "$WORKBENCH" = true ]; then
+            echo "🔧 Workbench mode: Build + serve via FastAPI"
+            
+            # Always build in Workbench for latest changes
+            build_frontend_with_fallbacks
+            
+            # Start backend which serves the built frontend
+            start_backend_simple
+            
         else
-            local_setup
+            echo "🔧 Local development mode: Separate servers"
+            
+            # Start backend
+            start_backend_simple &
+            BACKEND_PID=$!
+            echo "Backend PID: $BACKEND_PID"
+            
+            sleep 3
+            
+            # Start frontend dev server
+            start_frontend_dev
+            
+            # Wait for processes
+            echo "✅ Both servers running. Press Ctrl+C to stop."
+            wait $BACKEND_PID $FRONTEND_PID
+        fi
+        ;;
+    "help"|"-h"|"--help")
+        echo ""
+        echo "JazzVIBE Development Setup Script"
+        echo "================================="
+        echo ""
+        echo "Usage: $0 [COMMAND]"
+        echo ""
+        echo "Commands:"
+        echo "  start       - Smart startup (default)"
+        echo "  backend     - Start only FastAPI backend"
+        echo "  dev         - Local development (both servers)"
+        echo "  build       - Build React app for production"
+        echo "  rebuild     - Clean and build React app"
+        echo "  clean       - Clean previous builds"
+        echo "  help        - Show this help"
+        echo ""
+        echo "Environment Detection:"
+        if [ "$WORKBENCH" = true ]; then
+            echo "  📋 Current: Workbench mode"
+            echo "      - Builds React app and serves via FastAPI"
+            echo "      - Uses dynamic path detection"
+            echo "      - Single integrated server"
+        else
+            echo "  📋 Current: Local development mode"
+            echo "      - Runs separate backend and frontend servers"
+            echo "      - Frontend has hot reload"
+            echo "      - Uses proxy for API calls"
+        fi
+        echo ""
+        echo "Quick Start:"
+        if [ "$WORKBENCH" = true ]; then
+            echo "  ./setup_dev.sh           # Build and start integrated server"
+            echo "  ./setup_dev.sh backend   # Just start backend (if already built)"
+        else
+            echo "  ./setup_dev.sh           # Start both servers for development"
+            echo "  ./setup_dev.sh backend   # Start only backend"
         fi
         ;;
     *)
-        echo "Usage: $0 [backend|frontend|build|clean|rebuild|setup|both]"
-        echo ""
-        echo "Commands:"
-        echo "  backend  - Start only the FastAPI backend"
-        echo "  frontend - Start only the React frontend"
-        echo "  build    - Build React app for production"
-        echo "  clean    - Clean previous builds"
-        echo "  rebuild  - Clean and build"
-        echo "  setup    - Complete setup (default)"
-        echo "  both     - Same as setup"
-        echo ""
-        echo "Environment-specific behavior:"
-        if [ "$WORKBENCH" = true ]; then
-            echo "  📋 Workbench mode: Builds React app and serves via FastAPI"
-        else
-            echo "  📋 Local mode: Runs separate backend and frontend servers"
-        fi
+        echo "❌ Unknown command: $1"
+        echo "Use './setup_dev.sh help' for usage information"
         exit 1
         ;;
 esac
