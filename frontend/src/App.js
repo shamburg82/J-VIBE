@@ -73,12 +73,72 @@ const theme = createTheme({
   },
 });
 
+// Function to detect and normalize base path
+function getBasePath() {
+  // First check if server provided the base path (should be PATH ONLY, but handle if it's a full URL)
+  if (window.__POSIT_BASE_PATH__) {
+    let basePath = window.__POSIT_BASE_PATH__;
+    console.log('Using server-provided base path:', basePath);
+    
+    // Clean up in case server provided a full URL instead of just path
+    if (basePath.startsWith('http://') || basePath.startsWith('https://')) {
+      console.warn('App: Server provided full URL, extracting path only');
+      try {
+        const url = new URL(basePath);
+        basePath = url.pathname;
+      } catch (e) {
+        console.error('App: Failed to parse server-provided URL:', e);
+        basePath = '';
+      }
+    }
+    
+    // Clean up the path
+    // Ensure starts with /
+    if (basePath && !basePath.startsWith('/')) {
+      basePath = '/' + basePath;
+    }
+    
+    // Remove trailing /
+    if (basePath && basePath.endsWith('/')) {
+      basePath = basePath.slice(0, -1);
+    }
+    
+    return basePath;
+  }
+
+  // Fallback: client-side detection
+  const pathname = window.location.pathname;
+  
+  // Posit Workbench pattern: /s/{session}/p/{port}/
+  const workbenchMatch = pathname.match(/^(\/s\/[^\/]+\/p\/[^\/]+)/);
+  if (workbenchMatch) {
+    console.log('Client detected Workbench base path:', workbenchMatch[1]);
+    return workbenchMatch[1];
+  }
+  
+  // Posit Connect pattern: might vary, but typically includes /connect/
+  const connectMatch = pathname.match(/^(\/connect\/[^\/]*)/);
+  if (connectMatch) {
+    console.log('Client detected Connect base path:', connectMatch[1]);
+    return connectMatch[1];
+  }
+  
+  // Default: no base path
+  console.log('No base path detected, using empty string');
+  return '';
+}
+
 function App() {
   const [userRole, setUserRole] = useState('viewer'); // 'viewer' or 'admin'
   const [isLoading, setIsLoading] = useState(true);
   const [error, setError] = useState(null);
+  const [basePath, setBasePath] = useState('');
 
   useEffect(() => {
+    // Determine base path first
+    const detectedBasePath = getBasePath();
+    setBasePath(detectedBasePath);
+    
     // Check user permissions and app health
     const initializeApp = async () => {
       try {
@@ -141,14 +201,14 @@ function App() {
             <h2>Connection Error</h2>
             <p>{error}</p>
             <button onClick={() => window.location.reload()}>Retry</button>
+            <p style={{ fontSize: '12px', color: '#666', marginTop: '20px' }}>
+              Debug info: Base path = "{basePath}", Current URL = {window.location.href}
+            </p>
           </div>
         </Box>
       </ThemeProvider>
     );
   }
-
-  // Get the base path for routing
-  const basePath = window.__POSIT_BASE_PATH__ || '';
 
   return (
     <ThemeProvider theme={theme}>
