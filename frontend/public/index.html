@@ -5,7 +5,7 @@
     <link rel="icon" href="%PUBLIC_URL%/favicon.ico" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <meta name="theme-color" content="#1976d2" />
-    <meta name="description" content="!!JazzVIBE - Visual Interface for Biostatistical Exploration" />
+    <meta name="description" content="JazzVIBE - Visual Interface for Biostatistical Exploration" />
     <link rel="apple-touch-icon" href="%PUBLIC_URL%/logo192.png" />
     <link rel="manifest" href="%PUBLIC_URL%/manifest.json" />
     
@@ -25,40 +25,42 @@
     
     <title>JazzVIBE</title>
     
-    <!-- Dynamic base path handling -->
+    <!-- Dynamic base path handling - Server will inject if needed -->
     <script>
-      // Only run client-side detection if server didn't provide path
-      if (!window.__POSIT_BASE_PATH__) {
-        (function() {
+      // This script runs before React loads to set up base path detection
+      (function() {
+        // Only run client-side detection if server didn't provide path
+        if (!window.__POSIT_BASE_PATH__) {
           var pathname = window.location.pathname;
           var basePath = '';
           
+          console.log('Client-side base path detection for:', pathname);
+          
           // Posit Workbench pattern: /s/{session}/p/{port}/
-          var workbenchMatch = pathname.match(/^(\/s\/[^\/]+\/p\/[^\/]+)\//);
+          var workbenchMatch = pathname.match(/^(\/s\/[^\/]+\/p\/[^\/]+)/);
           if (workbenchMatch) {
-            basePath = workbenchMatch[1] + '/';
+            basePath = workbenchMatch[1];
+            console.log('Detected Workbench base path:', basePath);
           }
-          // Posit Connect pattern: /connect/#/apps/{app-id}/access
-          else if (pathname.includes('/connect/')) {
-            var connectMatch = pathname.match(/^(\/connect\/#\/apps\/[^\/]+\/access)/);
+          // Posit Connect pattern - more flexible
+          else if (pathname.indexOf('/connect/') === 0) {
+            var connectMatch = pathname.match(/^(\/connect\/[^\/]*)/);
             if (connectMatch) {
-              basePath = connectMatch[1] + '/';
+              basePath = connectMatch[1];
+              console.log('Detected Connect base path:', basePath);
             }
           }
           
           if (basePath) {
-            console.log('Client detected base path:', basePath);
             window.__POSIT_BASE_PATH__ = basePath;
-            
-            // Set the base element if not already set
-            if (!document.querySelector('base')) {
-              var baseElement = document.createElement('base');
-              baseElement.href = basePath;
-              document.head.appendChild(baseElement);
-            }
+            console.log('Client set base path:', window.__POSIT_BASE_PATH__);
+          } else {
+            console.log('No base path detected, using root');
           }
-        })();
-      }
+        } else {
+          console.log('Using server-provided base path:', window.__POSIT_BASE_PATH__);
+        }
+      })();
     </script>
     
     <style>
@@ -75,6 +77,7 @@
         justify-content: center;
         align-items: center;
         z-index: 9999;
+        font-family: 'Roboto', sans-serif;
       }
       
       .loading-spinner {
@@ -93,15 +96,31 @@
       }
       
       .loading-text {
-        font-family: 'Roboto', sans-serif;
         font-size: 18px;
         color: #666;
-        margin: 0;
+        margin: 8px 0;
+      }
+      
+      .loading-debug {
+        font-size: 12px;
+        color: #999;
+        margin-top: 16px;
+        max-width: 400px;
+        text-align: center;
       }
       
       /* Hide loading screen when React app loads */
       #root:not(:empty) + .loading-screen {
         display: none;
+      }
+      
+      /* Error state for loading screen */
+      .loading-screen.error {
+        background-color: #ffebee;
+      }
+      
+      .loading-screen.error .loading-text {
+        color: #c62828;
       }
     </style>
   </head>
@@ -110,10 +129,40 @@
     <div id="root"></div>
     
     <!-- Loading screen shown while React app loads -->
-    <div class="loading-screen">
+    <div id="loading-screen" class="loading-screen">
       <div class="loading-spinner"></div>
-      <p class="loading-text">Loading Jazz Vibe...</p>
+      <div class="loading-text">Loading JazzVIBE...</div>
+      <div class="loading-debug">
+        <div id="loading-debug-info">Initializing application...</div>
+      </div>
     </div>
+    
+    <script>
+      // Enhanced loading screen with debug info
+      (function() {
+        var debugInfo = document.getElementById('loading-debug-info');
+        var loadingScreen = document.getElementById('loading-screen');
+        
+        if (debugInfo) {
+          var info = [
+            'URL: ' + window.location.href,
+            'Path: ' + window.location.pathname,
+            'Base: ' + (window.__POSIT_BASE_PATH__ || 'none')
+          ];
+          debugInfo.innerHTML = info.join('<br>');
+        }
+        
+        // Auto-hide loading screen if React doesn't load within 30 seconds
+        setTimeout(function() {
+          if (loadingScreen && loadingScreen.style.display !== 'none') {
+            loadingScreen.classList.add('error');
+            if (debugInfo) {
+              debugInfo.innerHTML = 'Loading timeout - please refresh the page<br>' + debugInfo.innerHTML;
+            }
+          }
+        }, 30000);
+      })();
+    </script>
     
     <!-- 
       This HTML file is a template.
