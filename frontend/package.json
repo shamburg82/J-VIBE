@@ -2,6 +2,7 @@
   "name": "frontend",
   "version": "0.1.0",
   "private": true,
+  "homepage": ".",
   "dependencies": {
     "@emotion/react": "^11.11.1",
     "@emotion/styled": "^11.11.0",
@@ -23,8 +24,10 @@
   },
   "scripts": {
     "start": "craco start",
-    "build": "craco build",
-    "build-workbench": "GENERATE_SOURCEMAP=false craco build",
+    "build": "PUBLIC_URL=. craco build",
+    "build-workbench": "PUBLIC_URL=. GENERATE_SOURCEMAP=false NODE_OPTIONS='--max-old-space-size=4096' craco build",
+    "build-workbench-minimal": "PUBLIC_URL=. GENERATE_SOURCEMAP=false NODE_OPTIONS='--max-old-space-size=2048' craco build --optimize-for-size",
+    "build-local": "craco build",
     "test": "craco test",
     "eject": "react-scripts eject"
   },
@@ -45,5 +48,6 @@
       "last 1 firefox version",
       "last 1 safari version"
     ]
-  }
+  },
+  "proxy": "http://localhost:8000"
 }
