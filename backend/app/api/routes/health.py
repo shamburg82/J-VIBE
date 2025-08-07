@@ -1,5 +1,5 @@
 # backend/app/api/routes/health.py
-from fastapi import APIRouter, Depends
+from fastapi import APIRouter, Depends, Request
 from datetime import datetime
 import psutil
 import os
@@ -119,3 +119,116 @@ async def get_system_stats():
         
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Failed to gather system stats: {str(e)}")
+
+
+@router.get("/debug-paths")
+async def debug_path_detection_simple(request: Request):
+    """Debug endpoint for simplified main.py path detection issues."""
+    
+    import re
+    
+    # Get request details
+    request_url = str(request.url)
+    request_path = request.url.path
+    
+    # Use the same path cleaning logic as simplified main.py
+    logger.info(f"=== Debug Path Extraction ===")
+    logger.info(f"Original request_path: '{request_path}'")
+    
+    clean_request_path = request_path
+    extraction_steps = []
+    
+    if clean_request_path.startswith('//'):
+        extraction_steps.append(f"Step 1: Starts with '//', original: '{clean_request_path}'")
+        # Remove leading double slashes and extract path
+        clean_request_path = clean_request_path.lstrip('/')
+        extraction_steps.append(f"Step 2: After lstrip('/'): '{clean_request_path}'")
+        
+        # Look for any hostname pattern (generic domain detection)
+        if '.' in clean_request_path and '/' in clean_request_path:
+            extraction_steps.append("Step 3: Contains '.' and '/', checking for hostname")
+            parts = clean_request_path.split('/', 1)
+            if len(parts) > 1:
+                first_part = parts[0]
+                if '.' in first_part and (first_part.endswith('.com') or first_part.endswith('.org') or first_part.endswith('.net')):
+                    clean_request_path = '/' + parts[1]
+                    extraction_steps.append(f"Step 4: Hostname detected '{first_part}', extracted path: '{clean_request_path}'")
+                else:
+                    clean_request_path = '/' + clean_request_path
+                    extraction_steps.append(f"Step 4: No hostname pattern, added leading slash: '{clean_request_path}'")
+            else:
+                clean_request_path = '/'
+                extraction_steps.append("Step 4: Single part, using root '/'")
+        else:
+            clean_request_path = '/' + clean_request_path
+            extraction_steps.append(f"Step 3: No hostname pattern, added leading slash: '{clean_request_path}'")
+    
+    # Clean up any remaining double slashes
+    pre_cleanup = clean_request_path
+    clean_request_path = re.sub(r'/+', '/', clean_request_path)
+    if pre_cleanup != clean_request_path:
+        extraction_steps.append(f"Step 5: Cleaned double slashes: '{pre_cleanup}' -> '{clean_request_path}'")
+    
+    # Pattern matching
+    detected_base_path = ""
+    pattern_info = {}
+    
+    # Posit Workbench pattern: /s/{session}/p/{port}/
+    workbench_match = re.search(r'^(/s/[^/]+/p/[^/]+)', clean_request_path)
+    if workbench_match:
+        detected_base_path = workbench_match.group(1)
+        pattern_info["workbench_detected"] = True
+        pattern_info["workbench_match"] = detected_base_path
+    else:
+        pattern_info["workbench_detected"] = False
+    
+    # Posit Connect pattern: /connect/...
+    if clean_request_path.startswith('/connect/'):
+        connect_match = re.search(r'^(/connect/[^/]*)', clean_request_path)
+        if connect_match:
+            detected_base_path = connect_match.group(1)
+            pattern_info["connect_detected"] = True
+            pattern_info["connect_match"] = detected_base_path
+        else:
+            pattern_info["connect_detected"] = False
+    else:
+        pattern_info["connect_detected"] = False
+    
+    # Additional analysis
+    hostname_analysis = {}
+    if request_path.startswith('//'):
+        stripped = request_path.lstrip('/')
+        if '/' in stripped:
+            potential_hostname = stripped.split('/')[0]
+            if '.' in potential_hostname:
+                hostname_analysis["hostname_detected"] = potential_hostname
+                hostname_analysis["is_domain"] = any(potential_hostname.endswith(tld) for tld in ['.com', '.org', '.net', '.edu'])
+            else:
+                hostname_analysis["hostname_detected"] = None
+                hostname_analysis["is_domain"] = False
+    
+    return {
+        "request_url": request_url,
+        "request_path": request_path,
+        "clean_request_path": clean_request_path,
+        "detected_base_path": detected_base_path,
+        "fastapi_root_path": app.root_path if 'app' in globals() else "unknown",
+        "extraction_steps": extraction_steps,
+        "pattern_info": pattern_info,
+        "hostname_analysis": hostname_analysis,
+        "detection_patterns": {
+            "workbench_pattern": r'^(/s/[^/]+/p/[^/]+)',
+            "connect_pattern": r'^(/connect/[^/]*)',
+        },
+        "path_analysis": {
+            "starts_with_double_slash": request_path.startswith('//'),
+            "contains_domain": '.' in request_path and any(tld in request_path for tld in ['.com', '.org', '.net']),
+            "path_after_cleanup": clean_request_path,
+            "environment_detected": "workbench" if workbench_match else ("connect" if clean_request_path.startswith('/connect/') else "unknown")
+        },
+        "environment_vars": {
+            "RS_SERVER_URL": os.getenv("RS_SERVER_URL", "not_set"),
+            "RSTUDIO_CONNECT_URL": os.getenv("RSTUDIO_CONNECT_URL", "not_set"),
+            "PORT": os.getenv("PORT", "8000")
+        }
+    }
