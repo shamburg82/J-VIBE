@@ -1,17 +1,49 @@
 import axios from 'axios';
 
-// Determine the base URL based on environment
+// Determine the base URL based on environment and runtime detection
 const getBaseURL = () => {
   // In development, use proxy setup
   if (process.env.NODE_ENV === 'development') {
     return '/api/v1';
   }
   
-  // In production (Posit Connect/Workbench), use relative paths
-  // The root path will be handled by the FastAPI app's root_path configuration
-  return '/api/v1';
+  // In production, dynamically determine the base URL
+  // Use the same base path detection logic as the main app
+  let basePath = '';
+  
+  // First check if server provided the base path
+  if (window.__POSIT_BASE_PATH__) {
+    basePath = window.__POSIT_BASE_PATH__;
+    console.log('API Service: Using server-provided base path:', basePath);
+  } else {
+    // Fallback: client-side detection
+    const pathname = window.location.pathname;
+    
+    // Posit Workbench pattern: /s/{session}/p/{port}/
+    const workbenchMatch = pathname.match(/^(\/s\/[^\/]+\/p\/[^\/]+)/);
+    if (workbenchMatch) {
+      basePath = workbenchMatch[1] + '/';
+      console.log('API Service: Client detected Workbench base path:', basePath);
+    } else {
+      // Posit Connect pattern
+      const connectMatch = pathname.match(/^(\/connect\/[^\/]*)/);
+      if (connectMatch) {
+        basePath = connectMatch[1] + '/';
+        console.log('API Service: Client detected Connect base path:', basePath);
+      }
+    }
+  }
+  
+  // Ensure basePath ends with / but doesn't double up
+  if (basePath && !basePath.endsWith('/')) {
+    basePath += '/';
+  }
+  
+  const fullApiPath = `${basePath}api/v1`.replace(/\/+/g, '/'); // Remove double slashes
+  console.log('API Service: Final API base URL:', fullApiPath);
+  
+  return fullApiPath;
 };
-
 
 // Create axios instance with base configuration
 const api = axios.create({
@@ -25,7 +57,7 @@ const api = axios.create({
 // Request interceptor for logging
 api.interceptors.request.use(
   (config) => {
-    console.log(`API Request: ${config.method?.toUpperCase()} ${config.url}`);
+    console.log(`API Request: ${config.method?.toUpperCase()} ${config.baseURL}${config.url}`);
     return config;
   },
   (error) => {
@@ -55,6 +87,54 @@ api.interceptors.response.use(
     }
   }
 );
+
+// Helper function to get the current base path for EventSource URLs
+const getEventSourceBaseURL = () => {
+  let basePath = '';
+  
+  if (window.__POSIT_BASE_PATH__) {
+    basePath = window.__POSIT_BASE_PATH__;
+    
+    // Clean up in case server provided a full URL instead of just path
+    if (basePath.startsWith('http://') || basePath.startsWith('https://')) {
+      console.warn('EventSource: Server provided full URL, extracting path only');
+      try {
+        const url = new URL(basePath);
+        basePath = url.pathname;
+      } catch (e) {
+        console.error('EventSource: Failed to parse server-provided URL:', e);
+        basePath = '';
+      }
+    }
+  } else {
+    // Fallback detection
+    const pathname = window.location.pathname;
+    const workbenchMatch = pathname.match(/^(\/s\/[^\/]+\/p\/[^\/]+)/);
+    if (workbenchMatch) {
+      basePath = workbenchMatch[1];
+    } else {
+      const connectMatch = pathname.match(/^(\/connect\/[^\/]*)/);
+      if (connectMatch) {
+        basePath = connectMatch[1];
+      }
+    }
+  }
+  
+  // Clean up the base path
+  if (basePath) {
+    // Ensure starts with /
+    if (!basePath.startsWith('/')) {
+      basePath = '/' + basePath;
+    }
+    
+    // Remove trailing /
+    if (basePath.endsWith('/')) {
+      basePath = basePath.slice(0, -1);
+    }
+  }
+  
+  return basePath;
+};
 
 export const apiService = {
   // Health check
@@ -130,8 +210,10 @@ export const apiService = {
 
   // Streaming status updates
   createStatusStream(documentId) {
-    const baseUrl = getBaseURL().replace('/api/v1', ''); // Remove the API prefix for EventSource
-    const eventSource = new EventSource(`${baseUrl}/api/v1/documents/upload-stream/${documentId}`);
+    const basePath = getEventSourceBaseURL();
+    const url = `${basePath}/api/v1/documents/upload-stream/${documentId}`;
+    console.log('EventSource URL:', url);
+    const eventSource = new EventSource(url);
     return eventSource;
   },
 
@@ -198,20 +280,21 @@ export const apiService = {
 
   // Streaming chat
   createChatStream(sessionId, message, options = {}) {
-    const baseUrl = getBaseURL().replace('/api/v1', ''); // Remove the API prefix for EventSource
-    const eventSource = new EventSource(
-      `${baseUrl}/api/v1/chat/message-stream?${new URLSearchParams({
-        session_id: sessionId,
-        message: message,
-        ...options,
-      }).toString()}`
-    );
+    const basePath = getEventSourceBaseURL();
+    const params = new URLSearchParams({
+      session_id: sessionId,
+      message: message,
+      ...options,
+    });
+    const url = `${basePath}/api/v1/chat/message-stream?${params.toString()}`;
+    console.log('Chat EventSource URL:', url);
+    const eventSource = new EventSource(url);
     return eventSource;
   },
 
   // Quick start chat with streaming
   createQuickStartChatStream(documentId, message, title = null) {
-    const baseUrl = getBaseURL().replace('/api/v1', ''); // Remove the API prefix for EventSource
+    const basePath = getEventSourceBaseURL();
     const params = new URLSearchParams({
       document_id: documentId,
       first_message: message,
@@ -221,20 +304,46 @@ export const apiService = {
       params.append('title', title);
     }
     
-    const eventSource = new EventSource(`${baseUrl}/api/v1/chat/quick-start-stream?${params.toString()}`);
+    const url = `${basePath}/api/v1/chat/quick-start-stream?${params.toString()}`;
+    console.log('Quick Start Chat EventSource URL:', url);
+    const eventSource = new EventSource(url);
     return eventSource;
   },
 
   // Check if document is ready for chat
   async checkDocumentChatReady(documentId) {
-    const response = await api.get(`/document/${documentId}/chat-ready`);
-    return response.data;
+    // This endpoint might not exist yet, so we'll use document info as fallback
+    try {
+      const response = await api.get(`/documents/info/${documentId}`);
+      return {
+        chat_ready: response.data.status === 'completed',
+        message: response.data.status === 'completed' ? 'Ready for chat' : `Document status: ${response.data.status}`
+      };
+    } catch (error) {
+      return {
+        chat_ready: false,
+        message: 'Unable to check document status'
+      };
+    }
   },
 
-  // Get chat examples
+  // Get chat examples (mock for now)
   async getChatExamples() {
-    const response = await api.get('/chat/examples');
-    return response.data;
+    // This could be a real endpoint or mock data
+    return {
+      examples: {
+        demographics: [
+          "What are the baseline demographics?",
+          "Show me the patient enrollment by site"
+        ],
+        safety: [
+          "What adverse events were reported?"
+        ],
+        efficacy: [
+          "What was the primary endpoint result?"
+        ]
+      }
+    };
   },
 
   // Admin endpoints
