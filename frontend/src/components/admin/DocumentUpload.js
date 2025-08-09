@@ -1,3 +1,5 @@
+// Enhanced DocumentUpload.js with comprehensive debugging
+
 import React, { useState, useCallback, useRef } from 'react';
 import { useNavigate } from 'react-router-dom';
 import {
@@ -19,6 +21,11 @@ import {
   Chip,
   Grid,
   Divider,
+  Accordion,
+  AccordionSummary,
+  AccordionDetails,
+  Switch,
+  FormControlLabel,
 } from '@mui/material';
 import {
   CloudUpload,
@@ -28,6 +35,9 @@ import {
   Error,
   Schedule,
   ArrowBack,
+  BugReport,
+  ExpandMore,
+  Science,
 } from '@mui/icons-material';
 import { apiService } from '../../services/apiService';
 
@@ -43,9 +53,22 @@ const DocumentUpload = () => {
   
   // File and upload state
   const [selectedFiles, setSelectedFiles] = useState([]);
-  const [uploads, setUploads] = useState({}); // documentId -> upload info
+  const [uploads, setUploads] = useState({});
   const [isDragOver, setIsDragOver] = useState(false);
   const [error, setError] = useState(null);
+  
+  // Debug state
+  const [debugMode, setDebugMode] = useState(process.env.NODE_ENV === 'development');
+  const [debugInfo, setDebugInfo] = useState(null);
+  const [useAltEndpoint, setUseAltEndpoint] = useState(false);
+
+  // Quick fill for testing
+  const handleQuickFill = () => {
+    setCompound('JZP123');
+    setStudyId('JZP123-001');
+    setDeliverable('Final CSR');
+    setDescription('Test document upload');
+  };
 
   // Drag and drop handlers
   const handleDragOver = useCallback((e) => {
@@ -102,15 +125,28 @@ const DocumentUpload = () => {
   };
 
   const validateForm = () => {
-    if (!compound.trim()) {
+    setError(null);
+    
+    const trimmedCompound = compound.trim();
+    const trimmedStudyId = studyId.trim();
+    const trimmedDeliverable = deliverable.trim();
+    
+    console.log('Form validation:', {
+      compound: `"${trimmedCompound}" (${trimmedCompound.length} chars)`,
+      studyId: `"${trimmedStudyId}" (${trimmedStudyId.length} chars)`,
+      deliverable: `"${trimmedDeliverable}" (${trimmedDeliverable.length} chars)`,
+      filesCount: selectedFiles.length
+    });
+    
+    if (!trimmedCompound) {
       setError('Compound is required');
       return false;
     }
-    if (!studyId.trim()) {
+    if (!trimmedStudyId) {
       setError('Study ID is required');
       return false;
     }
-    if (!deliverable.trim()) {
+    if (!trimmedDeliverable) {
       setError('Deliverable is required');
       return false;
     }
@@ -121,34 +157,110 @@ const DocumentUpload = () => {
     return true;
   };
 
+  const createFormData = (fileObj) => {
+    const formData = new FormData();
+    
+    // Add file first
+    formData.append('file', fileObj.file);
+    
+    // Add form fields with exact names expected by backend
+    formData.append('compound', compound.trim());
+    formData.append('study_id', studyId.trim());
+    formData.append('deliverable', deliverable.trim());
+    
+    if (description.trim()) {
+      formData.append('description', description.trim());
+    }
+
+    return formData;
+  };
+
+  const testFormData = async (fileObj) => {
+    try {
+      const formData = createFormData(fileObj);
+      
+      console.log('Testing form data...');
+      const testResult = await apiService.testUpload(formData);
+      
+      setDebugInfo(testResult);
+      
+      if (!testResult.validation_results.compound_valid ||
+          !testResult.validation_results.study_id_valid ||
+          !testResult.validation_results.deliverable_valid) {
+        throw new Error(`Form validation failed: ${JSON.stringify(testResult.validation_results)}`);
+      }
+      
+      return testResult;
+    } catch (err) {
+      console.error('Form data test failed:', err);
+      throw err;
+    }
+  };
+
   const startUpload = async (fileObj) => {
     try {
-      const formData = new FormData();
-      formData.append('file', fileObj.file);
-      formData.append('compound', compound.trim());
-      formData.append('study_id', studyId.trim());
-      formData.append('deliverable', deliverable.trim());
-      if (description.trim()) {
-        formData.append('description', description.trim());
-      }
+      const formData = createFormData(fileObj);
+      
+      console.log('Starting upload for:', fileObj.name);
+      console.log('Form data created:', {
+        compound: compound.trim(),
+        study_id: studyId.trim(),
+        deliverable: deliverable.trim(),
+        description: description.trim(),
+        file: fileObj.file.name
+      });
 
-      // Start upload with progress tracking
-      const uploadResponse = await apiService.uploadDocument(
-        formData,
-        (progressPercent) => {
-          setUploads(prev => ({
-            ...prev,
-            [fileObj.id]: {
-              ...prev[fileObj.id],
-              uploadProgress: progressPercent
-            }
-          }));
-        }
-      );
+      let uploadResponse;
+      
+      if (debugMode) {
+        // Test form data first in debug mode
+        await testFormData(fileObj);
+      }
+      
+      if (useAltEndpoint) {
+        console.log('Using alternative upload endpoint...');
+        uploadResponse = await apiService.uploadDocumentAlt(
+          formData,
+          (progressPercent) => {
+            setUploads(prev => ({
+              ...prev,
+              [fileObj.id]: {
+                ...prev[fileObj.id],
+                uploadProgress: progressPercent
+              }
+            }));
+          }
+        );
+      } else if (debugMode) {
+        uploadResponse = await apiService.uploadDocumentDebug(
+          formData,
+          (progressPercent) => {
+            setUploads(prev => ({
+              ...prev,
+              [fileObj.id]: {
+                ...prev[fileObj.id],
+                uploadProgress: progressPercent
+              }
+            }));
+          }
+        );
+      } else {
+        uploadResponse = await apiService.uploadDocument(
+          formData,
+          (progressPercent) => {
+            setUploads(prev => ({
+              ...prev,
+              [fileObj.id]: {
+                ...prev[fileObj.id],
+                uploadProgress: progressPercent
+              }
+            }));
+          }
+        );
+      }
 
       const documentId = uploadResponse.document_id;
       
-      // Initialize upload tracking
       setUploads(prev => ({
         ...prev,
         [fileObj.id]: {
@@ -161,7 +273,6 @@ const DocumentUpload = () => {
         }
       }));
 
-      // Start processing status monitoring
       monitorProcessingStatus(fileObj.id, documentId);
 
     } catch (err) {
@@ -171,15 +282,19 @@ const DocumentUpload = () => {
         [fileObj.id]: {
           ...prev[fileObj.id],
           status: 'error',
-          error: err.message
+          error: err.message || 'Upload failed'
         }
       }));
+      
+      // Show detailed error in debug mode
+      if (debugMode) {
+        setError(`Upload failed: ${err.message}`);
+      }
     }
   };
 
   const monitorProcessingStatus = async (fileId, documentId) => {
     try {
-      // Use Server-Sent Events for real-time updates
       const eventSource = apiService.createStatusStream(documentId);
 
       eventSource.onmessage = (event) => {
@@ -199,7 +314,6 @@ const DocumentUpload = () => {
             }
           }));
 
-          // Close stream when processing is complete
           if (statusData.status === 'completed' || statusData.status === 'failed') {
             eventSource.close();
           }
@@ -212,14 +326,11 @@ const DocumentUpload = () => {
       eventSource.onerror = (error) => {
         console.error('EventSource error:', error);
         eventSource.close();
-        
-        // Fallback to polling
         setTimeout(() => pollProcessingStatus(fileId, documentId), 2000);
       };
 
     } catch (err) {
       console.error('Monitoring setup error:', err);
-      // Fallback to polling
       pollProcessingStatus(fileId, documentId);
     }
   };
@@ -242,14 +353,12 @@ const DocumentUpload = () => {
           }
         }));
 
-        // Continue polling if still processing
         if (status.status !== 'completed' && status.status !== 'failed') {
           setTimeout(() => pollProcessingStatus(fileId, documentId), 3000);
         }
       }
     } catch (err) {
       console.error('Polling error:', err);
-      // Retry polling after delay
       setTimeout(() => pollProcessingStatus(fileId, documentId), 5000);
     }
   };
@@ -259,8 +368,9 @@ const DocumentUpload = () => {
 
     setError(null);
     
-    // Start uploads for all pending files
     const pendingFiles = selectedFiles.filter(f => !uploads[f.id] || uploads[f.id].status === 'pending');
+    
+    console.log(`Starting upload of ${pendingFiles.length} files`);
     
     for (const fileObj of pendingFiles) {
       setUploads(prev => ({
@@ -273,7 +383,6 @@ const DocumentUpload = () => {
         }
       }));
       
-      // Start upload (async - don't wait)
       startUpload(fileObj);
     }
   };
@@ -330,6 +439,63 @@ const DocumentUpload = () => {
         </Typography>
       </Box>
 
+      {/* Debug Controls */}
+      {debugMode && (
+        <Accordion sx={{ mb: 3 }}>
+          <AccordionSummary expandIcon={<ExpandMore />}>
+            <BugReport sx={{ mr: 1 }} />
+            <Typography>Debug Controls</Typography>
+          </AccordionSummary>
+          <AccordionDetails>
+            <Grid container spacing={2} alignItems="center">
+              <Grid item>
+                <Button 
+                  variant="outlined" 
+                  startIcon={<Science />}
+                  onClick={handleQuickFill}
+                  size="small"
+                >
+                  Quick Fill Test Data
+                </Button>
+              </Grid>
+              <Grid item>
+                <FormControlLabel
+                  control={
+                    <Switch
+                      checked={useAltEndpoint}
+                      onChange={(e) => setUseAltEndpoint(e.target.checked)}
+                    />
+                  }
+                  label="Use Alternative Endpoint"
+                />
+              </Grid>
+              <Grid item>
+                <FormControlLabel
+                  control={
+                    <Switch
+                      checked={debugMode}
+                      onChange={(e) => setDebugMode(e.target.checked)}
+                    />
+                  }
+                  label="Debug Mode"
+                />
+              </Grid>
+            </Grid>
+            
+            {debugInfo && (
+              <Box sx={{ mt: 2, p: 2, bgcolor: 'grey.100', borderRadius: 1 }}>
+                <Typography variant="subtitle2" gutterBottom>
+                  Last Form Data Test Result:
+                </Typography>
+                <pre style={{ fontSize: '12px', overflow: 'auto', maxHeight: '200px' }}>
+                  {JSON.stringify(debugInfo, null, 2)}
+                </pre>
+              </Box>
+            )}
+          </AccordionDetails>
+        </Accordion>
+      )}
+
       <Grid container spacing={3}>
         {/* Upload Form */}
         <Grid item xs={12} md={6}>
@@ -346,6 +512,8 @@ const DocumentUpload = () => {
                 placeholder="e.g., JZP123"
                 fullWidth
                 disabled={hasActiveUploads}
+                helperText="Enter the compound identifier"
+                error={error && error.includes('Compound')}
               />
 
               <TextField
@@ -355,6 +523,8 @@ const DocumentUpload = () => {
                 placeholder="e.g., JZP123-001"
                 fullWidth
                 disabled={hasActiveUploads}
+                helperText="Enter the study identifier"
+                error={error && error.includes('Study')}
               />
 
               <TextField
@@ -364,6 +534,8 @@ const DocumentUpload = () => {
                 placeholder="e.g., Final CSR, Interim Analysis 1"
                 fullWidth
                 disabled={hasActiveUploads}
+                helperText="Enter the deliverable type"
+                error={error && error.includes('Deliverable')}
               />
 
               <TextField
@@ -375,8 +547,30 @@ const DocumentUpload = () => {
                 rows={3}
                 fullWidth
                 disabled={hasActiveUploads}
+                helperText="Optional description for the document"
               />
             </Box>
+
+            {/* Form Debug Info (only in debug mode) */}
+            {debugMode && (
+              <Box sx={{ mt: 2, p: 1, bgcolor: 'grey.100', borderRadius: 1 }}>
+                <Typography variant="caption" color="text.secondary">
+                  Current Form State:
+                </Typography>
+                <Typography variant="caption" display="block">
+                  Compound: "{compound}" ({compound.trim().length} chars) ✓{compound.trim() ? '✓' : '✗'}
+                </Typography>
+                <Typography variant="caption" display="block">
+                  Study ID: "{studyId}" ({studyId.trim().length} chars) {studyId.trim() ? '✓' : '✗'}
+                </Typography>
+                <Typography variant="caption" display="block">
+                  Deliverable: "{deliverable}" ({deliverable.trim().length} chars) {deliverable.trim() ? '✓' : '✗'}
+                </Typography>
+                <Typography variant="caption" display="block">
+                  Files: {selectedFiles.length} selected {selectedFiles.length > 0 ? '✓' : '✗'}
+                </Typography>
+              </Box>
+            )}
           </Paper>
 
           {/* File Drop Zone */}
@@ -424,11 +618,23 @@ const DocumentUpload = () => {
               variant="contained"
               size="large"
               onClick={handleUploadAll}
-              disabled={selectedFiles.length === 0 || hasActiveUploads || !compound || !studyId || !deliverable}
+              disabled={selectedFiles.length === 0 || hasActiveUploads || !compound.trim() || !studyId.trim() || !deliverable.trim()}
               startIcon={<CloudUpload />}
+              color={useAltEndpoint ? 'secondary' : 'primary'}
             >
-              Upload {selectedFiles.length} File{selectedFiles.length !== 1 ? 's' : ''}
+              {useAltEndpoint ? 'Upload (Alt)' : 'Upload'} {selectedFiles.length} File{selectedFiles.length !== 1 ? 's' : ''}
             </Button>
+            
+            {/* Validation summary */}
+            <Box sx={{ mt: 1 }}>
+              <Typography variant="caption" color="text.secondary">
+                {!compound.trim() && '• Compound required '}
+                {!studyId.trim() && '• Study ID required '}
+                {!deliverable.trim() && '• Deliverable required '}
+                {selectedFiles.length === 0 && '• At least one file required'}
+                {debugMode && ` • Debug mode: ${useAltEndpoint ? 'Alt endpoint' : 'Main endpoint'}`}
+              </Typography>
+            </Box>
           </Box>
         </Grid>
 
