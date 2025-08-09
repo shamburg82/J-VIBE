@@ -365,6 +365,247 @@ export const apiService = {
     };
   },
 
+  // Vector Store Configuration endpoints
+  async getVectorStoreConfig() {
+    const response = await api.get('/config/vector-store');
+    return response.data;
+  },
+  
+  async enableVectorStore() {
+    const response = await api.post('/config/vector-store/enable');
+    return response.data;
+  },
+  
+  async disableVectorStore() {
+    const response = await api.post('/config/vector-store/disable');
+    return response.data;
+  },
+  
+  // Admin/debugging endpoints
+  async getDocumentManifest() {
+    const response = await api.get('/admin/manifest');
+    return response.data;
+  },
+  
+  async rebuildDocumentManifest() {
+    const response = await api.post('/admin/rebuild-manifest');
+    return response.data;
+  },
+  
+  // Enhanced document info with file persistence awareness
+  async getDocumentInfoEnhanced(documentId) {
+    const response = await api.get(`/documents/info/${documentId}`);
+    const docInfo = response.data;
+    
+    // Add client-side enhancements for better UX
+    return {
+      ...docInfo,
+      canChat: docInfo.status === 'completed' && docInfo.has_vector_index,
+      canView: docInfo.status === 'completed' || docInfo.file_exists,
+      statusMessage: this.getDocumentStatusMessage(docInfo)
+    };
+  },
+  
+  // Helper method to generate user-friendly status messages
+  getDocumentStatusMessage(docInfo) {
+    if (docInfo.status === 'completed' && docInfo.has_vector_index) {
+      return 'Ready for viewing and chat';
+    } else if (docInfo.status === 'completed' && !docInfo.has_vector_index) {
+      return 'File stored, vector indexing disabled';
+    } else if (docInfo.status === 'processing') {
+      return 'Processing in progress...';
+    } else if (docInfo.status === 'failed') {
+      return 'Processing failed';
+    } else if (docInfo.file_exists && !docInfo.has_vector_index) {
+      return 'File available, processing not completed';
+    } else {
+      return 'Status unknown';
+    }
+  },
+
+  // Test form data transmission
+  async testUpload(formData) {
+    try {
+      console.log('Testing form data transmission...');
+      
+      // Log FormData contents
+      console.log('FormData contents:');
+      for (let [key, value] of formData.entries()) {
+        if (value instanceof File) {
+          console.log(`  ${key}:`, {
+            name: value.name,
+            size: value.size,
+            type: value.type
+          });
+        } else {
+          console.log(`  ${key}: "${value}" (${typeof value})`);
+        }
+      }
+      
+      const response = await api.post('/documents/upload-test', formData, {
+        headers: {
+          // Don't set Content-Type - let browser set it with boundary
+        },
+      });
+      
+      console.log('Test response:', response.data);
+      return response.data;
+    } catch (error) {
+      console.error('Test upload failed:', error);
+      throw error;
+    }
+  },
+
+  // Check if document is ready for chat
+  async checkDocumentChatReady(documentId) {
+    try {
+      const response = await api.get(`/documents/chat-ready/${documentId}`);
+      return response.data;
+    } catch (error) {
+      console.warn('Could not check chat readiness:', error);
+      return {
+        chat_ready: false,
+        message: 'Unable to check chat status'
+      };
+    }
+  },
+  
+  // Get PDF file URL for a document
+  getPdfUrl(documentId) {
+    const basePath = getEventSourceBaseURL(); // Reuse the base path detection
+    return `${basePath}/api/v1/documents/serve/${documentId}`;
+  },
+  
+  // Check if PDF is accessible
+  async checkPdfAccessible(documentId) {
+    try {
+      const url = this.getPdfUrl(documentId);
+      const response = await fetch(url, { method: 'HEAD' });
+      return response.ok;
+    } catch (error) {
+      console.warn('PDF accessibility check failed:', error);
+      return false;
+    }
+  },
+  
+  // Enhanced document info with additional metadata
+  async getDocumentInfoEnhanced(documentId) {
+    try {
+      const [docInfo, chatReady, pdfAccessible] = await Promise.all([
+        this.getDocumentInfo(documentId),
+        this.checkDocumentChatReady(documentId),
+        this.checkPdfAccessible(documentId)
+      ]);
+      
+      return {
+        ...docInfo,
+        chat_ready: chatReady.chat_ready,
+        chat_message: chatReady.message,
+        pdf_accessible: pdfAccessible,
+        pdf_url: pdfAccessible ? this.getPdfUrl(documentId) : null,
+        can_view: docInfo.status === 'completed' && pdfAccessible,
+        can_chat: docInfo.status === 'completed' && chatReady.chat_ready,
+        status_message: this.getEnhancedStatusMessage(docInfo, chatReady, pdfAccessible)
+      };
+    } catch (error) {
+      console.error('Enhanced document info failed:', error);
+      throw error;
+    }
+  },
+  
+  // Helper to generate comprehensive status messages
+  getEnhancedStatusMessage(docInfo, chatReady, pdfAccessible) {
+    if (docInfo.status !== 'completed') {
+      return `Document is ${docInfo.status}`;
+    }
+    
+    const capabilities = [];
+    if (pdfAccessible) capabilities.push('viewing');
+    if (chatReady.chat_ready) capabilities.push('chat');
+    
+    if (capabilities.length === 0) {
+      return 'Document processed but limited functionality available';
+    } else if (capabilities.length === 1) {
+      return `Document ready for ${capabilities[0]}`;
+    } else {
+      return `Document ready for ${capabilities.join(' and ')}`;
+    }
+  },
+  
+  // Enhanced upload with debugging
+  async uploadDocumentDebug(formData, onProgress) {
+    try {
+      console.log('=== UPLOAD DEBUG START ===');
+      
+      // First test the form data
+      const testResult = await this.testUpload(formData);
+      console.log('Form data test result:', testResult);
+      
+      // Check if validation would pass
+      const validation = testResult.validation_results;
+      if (!validation.compound_valid || !validation.study_id_valid || !validation.deliverable_valid) {
+        console.error('❌ Form validation would fail:', validation);
+        throw new Error(`Form validation failed: ${JSON.stringify(validation)}`);
+      }
+      
+      console.log('✅ Form data test passed, proceeding with upload...');
+      
+      // Try the main upload endpoint
+      const response = await api.post('/documents/upload', formData, {
+        headers: {
+          // Let browser set Content-Type with boundary for multipart/form-data
+        },
+        onUploadProgress: (progressEvent) => {
+          if (onProgress && progressEvent.total) {
+            const percentCompleted = Math.round(
+              (progressEvent.loaded * 100) / progressEvent.total
+            );
+            onProgress(percentCompleted);
+          }
+        },
+      });
+      
+      console.log('✅ Upload successful:', response.data);
+      console.log('=== UPLOAD DEBUG END ===');
+      return response.data;
+      
+    } catch (error) {
+      console.error('❌ Upload failed:', error);
+      
+      if (error.response) {
+        console.error('Error response:', {
+          status: error.response.status,
+          data: error.response.data,
+          headers: error.response.headers
+        });
+      }
+      
+      console.log('=== UPLOAD DEBUG END (ERROR) ===');
+      throw error;
+    }
+  },
+  
+  // Alternative upload method
+  async uploadDocumentAlt(formData, onProgress) {
+    console.log('Trying alternative upload endpoint...');
+    
+    const response = await api.post('/documents/upload-alt', formData, {
+      headers: {
+        // Let browser set Content-Type
+      },
+      onUploadProgress: (progressEvent) => {
+        if (onProgress && progressEvent.total) {
+          const percentCompleted = Math.round(
+            (progressEvent.loaded * 100) / progressEvent.total
+          );
+          onProgress(percentCompleted);
+        }
+      },
+    });
+    
+    return response.data;
+  },
+
   // Admin endpoints
   async getDocumentsSummary() {
     const response = await api.get('/documents/summary');
@@ -444,5 +685,6 @@ export const streamingUtils = {
     });
   },
 };
+
 
 export default apiService;
