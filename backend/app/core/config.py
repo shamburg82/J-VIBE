@@ -29,7 +29,9 @@ class Config:
     # Processing Settings
     chunk_size: int = 512
     chunk_overlap: int = 50
-    confidence_threshold: float = 0.7
+    confidence_threshold: float = 0.7,
+
+    use_vector_store: bool = True
     
     def get_aws_config(self) -> Dict[str, Any]:
         """Get AWS configuration dictionary."""
@@ -70,5 +72,7 @@ def get_config() -> Config:
         # Processing Settings
         chunk_size=int(os.getenv("CHUNK_SIZE", "512")),
         chunk_overlap=int(os.getenv("CHUNK_OVERLAP", "50")),
-        confidence_threshold=float(os.getenv("CONFIDENCE_THRESHOLD", "0.7"))
+        confidence_threshold=float(os.getenv("CONFIDENCE_THRESHOLD", "0.7")),
+
+        use_vector_store = True
     )
