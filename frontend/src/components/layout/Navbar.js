@@ -12,6 +12,7 @@ import {
   Breadcrumbs,
   Link,
   Chip,
+  Tooltip,
 } from '@mui/material';
 import {
   AccountCircle,
@@ -19,9 +20,12 @@ import {
   Visibility,
   Home,
   KeyboardArrowDown,
+  DeveloperMode,
+  Cloud,
+  Computer,
 } from '@mui/icons-material';
 
-const Navbar = ({ userRole }) => {
+const Navbar = ({ userRole, environment = {} }) => {
   const navigate = useNavigate();
   const location = useLocation();
   const [anchorEl, setAnchorEl] = useState(null);
@@ -92,6 +96,38 @@ const Navbar = ({ userRole }) => {
     return breadcrumbs;
   };
 
+  const getEnvironmentIcon = () => {
+    if (environment.isWorkbench) {
+      return <DeveloperMode />;
+    } else if (environment.isConnect) {
+      return <Cloud />;
+    } else {
+      return <Computer />;
+    }
+  };
+
+  const getEnvironmentLabel = () => {
+    if (environment.isWorkbench) {
+      return 'Workbench';
+    } else if (environment.isConnect) {
+      return 'Connect';
+    } else if (environment.isDevelopment) {
+      return 'Development';
+    } else {
+      return 'Production';
+    }
+  };
+
+  const getEnvironmentColor = () => {
+    if (environment.isWorkbench || environment.isDevelopment) {
+      return 'warning';
+    } else if (environment.isConnect) {
+      return 'info';
+    } else {
+      return 'default';
+    }
+  };
+
   const breadcrumbs = generateBreadcrumbs();
 
   return (
@@ -158,6 +194,25 @@ const Navbar = ({ userRole }) => {
             })}
           </Breadcrumbs>
         </Box>
+
+        {/* Environment Indicator */}
+        <Tooltip title={`Running in ${getEnvironmentLabel()} mode`}>
+          <Chip
+            icon={getEnvironmentIcon()}
+            label={getEnvironmentLabel()}
+            variant="outlined"
+            size="small"
+            color={getEnvironmentColor()}
+            sx={{
+              color: 'white',
+              borderColor: 'rgba(255, 255, 255, 0.5)',
+              mr: 1,
+              '& .MuiChip-icon': {
+                color: 'inherit',
+              },
+            }}
+          />
+        </Tooltip>
 
         {/* User Role Indicator */}
         <Chip
