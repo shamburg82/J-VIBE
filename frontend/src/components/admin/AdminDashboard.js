@@ -18,6 +18,16 @@ import {
   ListItemText,
   ListItemIcon,
   Divider,
+  Switch,
+  FormControlLabel,
+  Dialog,
+  DialogTitle,
+  DialogContent,
+  DialogActions,
+  DialogContentText,
+  Accordion,
+  AccordionSummary,
+  AccordionDetails,
 } from '@mui/material';
 import {
   CloudUpload,
@@ -30,6 +40,11 @@ import {
   Science,
   Assignment,
   Schedule,
+  Storage,
+  Folder,
+  ExpandMore,
+  Info,
+  Build,
 } from '@mui/icons-material';
 import { apiService } from '../../services/apiService';
 import { format } from 'date-fns';
@@ -39,9 +54,12 @@ const AdminDashboard = () => {
   const [systemStats, setSystemStats] = useState(null);
   const [healthStatus, setHealthStatus] = useState(null);
   const [documentsSummary, setDocumentsSummary] = useState(null);
+  const [vectorStoreConfig, setVectorStoreConfig] = useState(null);
   const [recentDocuments, setRecentDocuments] = useState([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState(null);
+  const [configDialog, setConfigDialog] = useState({ open: false, action: null });
+  const [configLoading, setConfigLoading] = useState(false);
 
   useEffect(() => {
     const fetchDashboardData = async () => {
@@ -49,15 +67,17 @@ const AdminDashboard = () => {
         setLoading(true);
         
         // Fetch all dashboard data in parallel
-        const [stats, health, docSummary] = await Promise.all([
+        const [stats, health, docSummary, vectorConfig] = await Promise.all([
           apiService.getSystemStats(),
           apiService.getDetailedHealth(),
           apiService.getDocumentsSummary(),
+          apiService.getVectorStoreConfig().catch(() => null), // Optional - may not be implemented yet
         ]);
 
         setSystemStats(stats);
         setHealthStatus(health);
         setDocumentsSummary(docSummary);
+        setVectorStoreConfig(vectorConfig);
         setRecentDocuments(docSummary.recent_documents || []);
 
       } catch (err) {
@@ -70,6 +90,47 @@ const AdminDashboard = () => {
 
     fetchDashboardData();
   }, []);
+
+  const handleVectorStoreToggle = async (enable) => {
+    setConfigDialog({ 
+      open: true, 
+      action: enable ? 'enable' : 'disable',
+      title: enable ? 'Enable Vector Store' : 'Disable Vector Store',
+      message: enable ? 
+        'This will enable full document processing with vector indexing for future uploads. Documents will be searchable and support chat functionality.' :
+        'This will disable vector store processing. Future uploads will only store files without indexing. Chat functionality will not be available for new documents.',
+      confirmText: enable ? 'Enable' : 'Disable'
+    });
+  };
+
+  const confirmVectorStoreChange = async () => {
+    try {
+      setConfigLoading(true);
+      
+      const endpoint = configDialog.action === 'enable' ? 
+        '/api/v1/config/vector-store/enable' : 
+        '/api/v1/config/vector-store/disable';
+      
+      // Make API call to toggle vector store
+      const response = await fetch(endpoint, { method: 'POST' });
+      if (!response.ok) {
+        throw new Error(`Failed to ${configDialog.action} vector store`);
+      }
+      
+      const result = await response.json();
+      setVectorStoreConfig({ vector_store_config: result.config });
+      
+      setConfigDialog({ open: false, action: null });
+      
+      // Show success message
+      setError(null);
+      
+    } catch (err) {
+      setError(`Failed to ${configDialog.action} vector store: ${err.message}`);
+    } finally {
+      setConfigLoading(false);
+    }
+  };
 
   const getStatusColor = (status) => {
     switch (status) {
@@ -140,6 +201,106 @@ const AdminDashboard = () => {
           Monitor system health and manage TLF documents
         </Typography>
       </Box>
+
+      {/* Vector Store Configuration Card */}
+      {vectorStoreConfig && (
+        <Card sx={{ mb: 4 }}>
+          <CardContent>
+            <Box sx={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', mb: 2 }}>
+              <Typography variant="h6">
+                <Storage sx={{ mr: 1, verticalAlign: 'middle' }} />
+                Vector Store Configuration
+              </Typography>
+              <Chip 
+                label={vectorStoreConfig.vector_store_config.enabled ? 'Enabled' : 'Disabled'}
+                color={vectorStoreConfig.vector_store_config.enabled ? 'success' : 'warning'}
+                variant="outlined"
+              />
+            </Box>
+            
+            <Typography variant="body2" color="text.secondary" sx={{ mb: 2 }}>
+              Vector store controls document indexing and chat functionality. When disabled, 
+              only file storage is performed.
+            </Typography>
+
+            <Grid container spacing={2} sx={{ mb: 2 }}>
+              <Grid item xs={12} sm={6} md={3}>
+                <Box sx={{ textAlign: 'center' }}>
+                  <Typography variant="h5" color="primary">
+                    {vectorStoreConfig.vector_store_config.documents_with_vector_index || 0}
+                  </Typography>
+                  <Typography variant="body2" color="text.secondary">
+                    With Vector Index
+                  </Typography>
+                </Box>
+              </Grid>
+              <Grid item xs={12} sm={6} md={3}>
+                <Box sx={{ textAlign: 'center' }}>
+                  <Typography variant="h5" color="warning.main">
+                    {vectorStoreConfig.vector_store_config.documents_file_only || 0}
+                  </Typography>
+                  <Typography variant="body2" color="text.secondary">
+                    Files Only
+                  </Typography>
+                </Box>
+              </Grid>
+              <Grid item xs={12} sm={6} md={3}>
+                <Box sx={{ textAlign: 'center' }}>
+                  <Typography variant="h5">
+                    {vectorStoreConfig.vector_store_config.total_documents || 0}
+                  </Typography>
+                  <Typography variant="body2" color="text.secondary">
+                    Total Documents
+                  </Typography>
+                </Box>
+              </Grid>
+              <Grid item xs={12} sm={6} md={3}>
+                <Box sx={{ display: 'flex', justifyContent: 'center', alignItems: 'center' }}>
+                  <FormControlLabel
+                    control={
+                      <Switch
+                        checked={vectorStoreConfig.vector_store_config.enabled}
+                        onChange={(e) => handleVectorStoreToggle(e.target.checked)}
+                        disabled={configLoading}
+                      />
+                    }
+                    label="Enable Vector Store"
+                  />
+                </Box>
+              </Grid>
+            </Grid>
+
+            <Accordion>
+              <AccordionSummary expandIcon={<ExpandMore />}>
+                <Typography variant="body2">
+                  <Info sx={{ mr: 1, fontSize: 'small', verticalAlign: 'middle' }} />
+                  Advanced Configuration
+                </Typography>
+              </AccordionSummary>
+              <AccordionDetails>
+                <Grid container spacing={2}>
+                  <Grid item xs={12} md={6}>
+                    <Typography variant="body2" color="text.secondary">
+                      Storage Path:
+                    </Typography>
+                    <Typography variant="body2" sx={{ fontFamily: 'monospace', wordBreak: 'break-all' }}>
+                      {vectorStoreConfig.vector_store_config.storage_path}
+                    </Typography>
+                  </Grid>
+                  <Grid item xs={12} md={6}>
+                    <Typography variant="body2" color="text.secondary">
+                      Manifest Path:
+                    </Typography>
+                    <Typography variant="body2" sx={{ fontFamily: 'monospace', wordBreak: 'break-all' }}>
+                      {vectorStoreConfig.vector_store_config.manifest_path}
+                    </Typography>
+                  </Grid>
+                </Grid>
+              </AccordionDetails>
+            </Accordion>
+          </CardContent>
+        </Card>
+      )}
 
       {/* Quick Actions */}
       <Grid container spacing={3} sx={{ mb: 4 }}>
@@ -415,6 +576,42 @@ const AdminDashboard = () => {
           </Paper>
         </Grid>
       </Grid>
+
+      {/* Vector Store Configuration Dialog */}
+      <Dialog
+        open={configDialog.open}
+        onClose={() => !configLoading && setConfigDialog({ open: false, action: null })}
+        maxWidth="sm"
+        fullWidth
+      >
+        <DialogTitle>{configDialog.title}</DialogTitle>
+        <DialogContent>
+          <DialogContentText>
+            {configDialog.message}
+          </DialogContentText>
+          {configDialog.action === 'disable' && (
+            <Alert severity="warning" sx={{ mt: 2 }}>
+              This will not affect existing documents, only future uploads.
+            </Alert>
+          )}
+        </DialogContent>
+        <DialogActions>
+          <Button 
+            onClick={() => setConfigDialog({ open: false, action: null })}
+            disabled={configLoading}
+          >
+            Cancel
+          </Button>
+          <Button 
+            onClick={confirmVectorStoreChange}
+            variant="contained"
+            disabled={configLoading}
+            color={configDialog.action === 'enable' ? 'primary' : 'warning'}
+          >
+            {configLoading ? 'Processing...' : configDialog.confirmText}
+          </Button>
+        </DialogActions>
+      </Dialog>
     </Container>
   );
 };
