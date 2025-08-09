@@ -1,4 +1,4 @@
-# backend/main.py (Final working version)
+# backend/main.py (Clean production version)
 import os
 import subprocess
 import logging
@@ -10,10 +10,17 @@ from fastapi.staticfiles import StaticFiles
 from fastapi.responses import FileResponse, HTMLResponse, JSONResponse
 from fastapi.middleware.cors import CORSMiddleware
 from starlette.middleware.base import BaseHTTPMiddleware
+from contextlib import asynccontextmanager
 
 # Configure logging
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
+
+# Global service variables
+document_service = None
+query_service = None
+storage_service = None
+chat_service = None
 
 def get_posit_root_path(port: int = 8000) -> str:
     """Get root path for Posit Workbench using rserver-url."""
@@ -55,6 +62,84 @@ logger.info(f"📁 Root path: '{root_path}'")
 # Define static_dir early
 static_dir = Path(__file__).parent.parent / "frontend/build"
 
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    """Application lifespan manager - startup and shutdown."""
+    global document_service, query_service, storage_service, chat_service
+    
+    # Startup
+    logger.info("🚀 Starting TLF Analyzer API services")
+    
+    try:
+        # Detect environment and get appropriate config
+        config = None
+        if is_connect or is_workbench:
+            # Use Posit-specific configuration
+            try:
+                from app.core.posit_config import get_posit_config
+                config = get_posit_config()
+                logger.info(f"Using Posit configuration: {config.get_environment_name()}")
+            except ImportError as e:
+                logger.warning(f"Could not import Posit config: {e}, using standard config")
+                from app.core.config import get_config
+                config = get_config()
+        else:
+            # Use standard configuration
+            from app.core.config import get_config
+            config = get_config()
+        
+        # Initialize Bedrock LLM with appropriate setup
+        if is_connect or is_workbench:
+            try:
+                from app.core.posit_bedrock_setup import configure_bedrock_for_posit
+                llm = await configure_bedrock_for_posit()
+            except ImportError:
+                logger.warning("Could not import Posit Bedrock setup, using standard setup")
+                from app.core.bedrock_setup import configure_bedrock_llm
+                llm = await configure_bedrock_llm()
+        else:
+            from app.core.bedrock_setup import configure_bedrock_llm
+            llm = await configure_bedrock_llm()
+            
+        if not llm:
+            raise Exception("Failed to initialize Bedrock LLM")
+        
+        # Initialize services with config
+        from app.services.storage_service import StorageService
+        from app.services.document_service import DocumentService
+        from app.services.query_service import QueryService
+        from app.services.chat_service import ChatService
+        
+        storage_service = StorageService()
+        document_service = DocumentService(
+            llm=llm, 
+            storage_service=storage_service,
+            config=config
+        )
+        query_service = QueryService(llm=llm, storage_service=storage_service)
+        
+        # Initialize chat service
+        chat_service = ChatService(
+            llm=llm, 
+            storage_service=storage_service, 
+            query_service=query_service
+        )
+        
+        logger.info("✅ All services initialized successfully")
+        if config and hasattr(config, 'get_storage_path'):
+            logger.info(f"📁 Storage path: {config.get_storage_path()}")
+        elif config and hasattr(config, 'base_storage_path'):
+            logger.info(f"📁 Storage path: {config.base_storage_path}")
+        
+    except Exception as e:
+        logger.error(f"❌ Failed to initialize services: {e}")
+        raise
+    
+    yield
+    
+    # Shutdown
+    logger.info("🛑 Shutting down TLF Analyzer API")
+
 class PathNormalizationMiddleware(BaseHTTPMiddleware):
     """Middleware to normalize paths for Posit environments."""
     
@@ -64,8 +149,6 @@ class PathNormalizationMiddleware(BaseHTTPMiddleware):
         
     async def dispatch(self, request: Request, call_next):
         original_path = request.url.path
-        logger.info(f"🔍 Original path: '{original_path}'")
-        
         clean_path = original_path
         
         # Handle malformed paths with hostnames
@@ -75,18 +158,15 @@ class PathNormalizationMiddleware(BaseHTTPMiddleware):
                 parts = temp_path.split('/', 1)
                 if '.' in parts[0]:  # Likely a hostname
                     clean_path = '/' + parts[1]
-                    logger.info(f"🔧 Removed hostname: '{clean_path}'")
         
         # Remove root path prefix
         if self.root_path and clean_path.startswith(self.root_path):
             clean_path = clean_path[len(self.root_path):]
             if not clean_path.startswith('/'):
                 clean_path = '/' + clean_path
-            logger.info(f"🔧 Removed root path: '{clean_path}'")
         
         # Clean up double slashes
         clean_path = re.sub(r'/+', '/', clean_path)
-        logger.info(f"🔧 Final cleaned path: '{clean_path}'")
         
         # Update request
         request.scope['path'] = clean_path
@@ -116,8 +196,6 @@ class ReactFallbackMiddleware(BaseHTTPMiddleware):
         
         # Process base path if we have one
         if root_path:
-            logger.info(f"🔧 Processing React HTML with base path: '{root_path}'")
-            
             # Replace paths
             html_content = html_content.replace('href="./static/', f'href="{root_path}/static/')
             html_content = html_content.replace('src="./static/', f'src="{root_path}/static/')
@@ -154,12 +232,7 @@ class ReactFallbackMiddleware(BaseHTTPMiddleware):
             path = request.url.path
             accept_header = request.headers.get("accept", "")
             
-            logger.info(f"🎭 404 for path: {path}, Accept: {accept_header}")
-            
-            # Don't serve React for:
-            # 1. API routes
-            # 2. JSON requests (unless they also accept HTML)
-            # 3. Static files
+            # Don't serve React for API routes, JSON requests, or static files
             is_api_route = (path.startswith("/api/") or 
                           path.startswith("/docs") or 
                           path.startswith("/openapi.json") or 
@@ -172,20 +245,18 @@ class ReactFallbackMiddleware(BaseHTTPMiddleware):
             is_static_file = path.startswith("/static/")
             
             if not is_api_route and not is_json_only_request and not is_static_file:
-                logger.info(f"🎭 Serving React app for: {path}")
                 react_html = self.get_react_html()
                 if react_html:
                     return HTMLResponse(content=react_html)
-            else:
-                logger.info(f"🎭 Not serving React for: {path} (api:{is_api_route}, json:{is_json_only_request}, static:{is_static_file})")
         
         return response
 
-# Create FastAPI app
+# Create FastAPI app with lifespan
 app = FastAPI(
     title="JazzVIBE API",
     description="API for processing and querying TLF Bundles",
-    version="1.0.0"
+    version="1.0.0",
+    lifespan=lifespan
 )
 
 # Add CORS
@@ -204,40 +275,41 @@ if root_path:
 if static_dir.exists():
     app.add_middleware(ReactFallbackMiddleware)
 
+# Dependency functions to get services
+def get_document_service():
+    if document_service is None:
+        raise HTTPException(status_code=503, detail="Document service not initialized")
+    return document_service
+
+def get_query_service():
+    if query_service is None:
+        raise HTTPException(status_code=503, detail="Query service not initialized")
+    return query_service
+
+def get_storage_service():
+    if storage_service is None:
+        raise HTTPException(status_code=503, detail="Storage service not initialized")
+    return storage_service
+
+def get_chat_service():
+    if chat_service is None:
+        raise HTTPException(status_code=503, detail="Chat service not initialized")
+    return chat_service
+
 # Import and include API routes
 try:
     from app.api.routes import documents, queries, health, chat
     
-    # Mount health router at both paths to handle trailing slash issues
+    # Mount API routes
     app.include_router(health.router, prefix="/api/v1/health", tags=["health"])
     app.include_router(documents.router, prefix="/api/v1/documents", tags=["documents"])  
     app.include_router(queries.router, prefix="/api/v1/queries", tags=["queries"])
     app.include_router(chat.router, prefix="/api/v1/chat", tags=["chat"])
     
-    # Add explicit route for health without trailing slash
-    @app.get("/api/v1/health")
-    async def health_no_slash():
-        """Health endpoint without trailing slash to match frontend expectations."""
-        return {
-            "status": "healthy",
-            "timestamp": datetime.now(),
-            "services": {
-                "api": "healthy",
-                "bedrock": "healthy",
-                "storage": "healthy"
-            },
-            "version": "1.0.0"
-        }
-    
     logger.info("✅ API routes loaded successfully")
     
 except ImportError as e:
     logger.error(f"❌ Failed to import routes: {e}")
-    
-    # Fallback health endpoint
-    @app.get("/api/v1/health")
-    async def fallback_health():
-        return {"status": "error", "message": "Routes not loaded", "error": str(e)}
 
 # Direct health endpoint
 @app.get("/health")
@@ -249,24 +321,40 @@ async def health_check():
             "is_connect": is_connect,
             "is_workbench": is_workbench,
             "port": os.getenv("PORT", "8000")
+        },
+        "services_initialized": {
+            "document_service": document_service is not None,
+            "query_service": query_service is not None,
+            "storage_service": storage_service is not None,
+            "chat_service": chat_service is not None
         }
+    }
+
+# Add explicit route for health without trailing slash
+@app.get("/api/v1/health")
+async def health_no_slash():
+    """Health endpoint without trailing slash to match frontend expectations."""
+    return {
+        "status": "healthy",
+        "timestamp": datetime.now(),
+        "services": {
+            "api": "healthy",
+            "bedrock": "healthy" if document_service else "not_initialized",
+            "storage": "healthy" if storage_service else "not_initialized"
+        },
+        "version": "1.0.0"
     }
 
 # Static files and specific routes
 if static_dir.exists():
     logger.info(f"📁 Serving React static files from: {static_dir}")
     
-    # Instead of mounting, create explicit static file handler
     @app.get("/static/{file_path:path}")
     async def serve_static_files(file_path: str):
         """Serve static files with correct MIME types."""
         static_file_path = static_dir / "static" / file_path
         
-        logger.info(f"📁 Static file request: /static/{file_path}")
-        logger.info(f"📁 Looking for file: {static_file_path}")
-        
         if not static_file_path.exists():
-            logger.warning(f"❌ Static file not found: {static_file_path}")
             raise HTTPException(status_code=404, detail="Static file not found")
         
         # Determine MIME type based on file extension
@@ -289,7 +377,6 @@ if static_dir.exists():
         else:
             media_type = "application/octet-stream"
         
-        logger.info(f"✅ Serving static file: {static_file_path} as {media_type}")
         return FileResponse(static_file_path, media_type=media_type)
     
     # Specific file routes
@@ -311,13 +398,9 @@ if static_dir.exists():
     @app.get("/")
     async def root(request: Request):
         accept_header = request.headers.get("accept", "")
-        user_agent = request.headers.get("user-agent", "")
-        
-        logger.info(f"🏠 Root endpoint - Accept: {accept_header[:50]}")
         
         # If the request specifically wants JSON (API clients/tests)
         if ("application/json" in accept_header and "text/html" not in accept_header):
-            logger.info("🏠 Serving JSON API info")
             return {
                 "message": "JazzVIBE API",
                 "version": "1.0.0", 
@@ -327,7 +410,6 @@ if static_dir.exists():
             }
         
         # Otherwise, serve React app (browsers)
-        logger.info("🏠 Serving React app")
         index_file = static_dir / "index.html"
         if not index_file.exists():
             return {"error": "React app not available", "message": "Frontend not built"}
@@ -352,13 +434,89 @@ else:
             "error": "React app not built"
         }
 
-# Debug route info
-logger.info("📋 Registered routes:")
-for i, route in enumerate(app.routes):
-    if hasattr(route, 'methods') and hasattr(route, 'path'):
-        logger.info(f"  {i+1:2d}. {route.methods} {route.path}")
-    elif hasattr(route, 'path'):
-        logger.info(f"  {i+1:2d}. MOUNT {route.path}")
+# Additional convenience endpoints for chat integration
+@app.get("/api/v1/document/{document_id}/chat-ready")
+async def check_document_chat_ready(document_id: str):
+    """Check if a document is ready for chat (processed and indexed)."""
+    
+    try:
+        # Check if document exists and is processed
+        doc_info = await document_service.get_document_info(document_id)
+        if not doc_info:
+            raise HTTPException(status_code=404, detail="Document not found")
+        
+        if doc_info.status != "completed":
+            return {
+                "chat_ready": False,
+                "status": doc_info.status,
+                "message": f"Document is still being processed (status: {doc_info.status})"
+            }
+        
+        # Check if vector index exists
+        vector_index = await storage_service.get_index(document_id)
+        if not vector_index:
+            return {
+                "chat_ready": False,
+                "status": "no_index",
+                "message": "Document processed but vector index not available"
+            }
+        
+        # Get available sources for context
+        sources = await query_service.get_available_sources(document_id)
+        
+        return {
+            "chat_ready": True,
+            "status": "ready",
+            "message": "Document is ready for chat",
+            "document_info": {
+                "filename": doc_info.filename,
+                "total_pages": doc_info.total_pages,
+                "total_chunks": doc_info.total_chunks,
+                "tlf_outputs_found": doc_info.tlf_outputs_found
+            },
+            "available_sources": sources
+        }
+        
+    except Exception as e:
+        logger.error(f"Error checking chat readiness for document {document_id}: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.get("/api/v1/chat/examples")
+async def get_chat_examples():
+    """Get example chat queries for different types of clinical data."""
+    
+    return {
+        "examples": {
+            "demographics": [
+                "What are the baseline demographics of the study participants?",
+                "How many patients were enrolled in each treatment group?",
+                "What was the average age of participants?"
+            ],
+            "safety": [
+                "What were the most common adverse events?",
+                "Were there any serious adverse events related to treatment?",
+                "How did the safety profile compare between treatment groups?"
+            ],
+            "efficacy": [
+                "What were the primary efficacy results?",
+                "Did the treatment show statistical significance?",
+                "How did efficacy compare between different dose levels?"
+            ],
+            "follow_up": [
+                "Can you explain that in more detail?",
+                "What about the secondary endpoints?",
+                "How does this compare to what you mentioned earlier?",
+                "Were there any subgroup analyses?"
+            ]
+        },
+        "tips": [
+            "Ask follow-up questions to get more detailed information",
+            "Reference specific table numbers if you know them",
+            "Ask for comparisons between treatment groups",
+            "Request clarification on clinical terminology",
+            "Ask about statistical significance and confidence intervals"
+        ]
+    }
 
 # For running directly
 if __name__ == "__main__":
