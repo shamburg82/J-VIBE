@@ -73,9 +73,32 @@ const theme = createTheme({
   },
 });
 
+// Function to detect environment
+function detectEnvironment() {
+  // Check if we're in Posit Workbench (development)
+  const isWorkbench = Boolean(
+    window.location.hostname.includes('rstudio') ||
+    window.location.pathname.includes('/s/') ||
+    process.env.NODE_ENV === 'development'
+  );
+  
+  // Check if we're in Posit Connect (production)
+  const isConnect = Boolean(
+    window.location.pathname.includes('/connect/') ||
+    window.__POSIT_CONNECT__
+  );
+  
+  return {
+    isWorkbench,
+    isConnect,
+    isDevelopment: isWorkbench || process.env.NODE_ENV === 'development',
+    isProduction: isConnect || process.env.NODE_ENV === 'production',
+  };
+}
+
 // Function to detect and normalize base path
 function getBasePath() {
-  // First check if server provided the base path (should be PATH ONLY, but handle if it's a full URL)
+  // First check if server provided the base path
   if (window.__POSIT_BASE_PATH__) {
     let basePath = window.__POSIT_BASE_PATH__;
     console.log('Using server-provided base path:', basePath);
@@ -93,12 +116,10 @@ function getBasePath() {
     }
     
     // Clean up the path
-    // Ensure starts with /
     if (basePath && !basePath.startsWith('/')) {
       basePath = '/' + basePath;
     }
     
-    // Remove trailing /
     if (basePath && basePath.endsWith('/')) {
       basePath = basePath.slice(0, -1);
     }
@@ -133,11 +154,18 @@ function App() {
   const [isLoading, setIsLoading] = useState(true);
   const [error, setError] = useState(null);
   const [basePath, setBasePath] = useState('');
+  const [environment, setEnvironment] = useState({});
 
   useEffect(() => {
-    // Determine base path first
+    // Determine base path and environment
     const detectedBasePath = getBasePath();
+    const detectedEnvironment = detectEnvironment();
+    
     setBasePath(detectedBasePath);
+    setEnvironment(detectedEnvironment);
+    
+    console.log('Environment detected:', detectedEnvironment);
+    console.log('Base path detected:', detectedBasePath);
     
     // Check user permissions and app health
     const initializeApp = async () => {
@@ -147,15 +175,20 @@ function App() {
         // Check API health
         await apiService.checkHealth();
         
-        // In a real app, you'd check user permissions here
-        // For now, we'll simulate based on environment or URL params
-        const urlParams = new URLSearchParams(window.location.search);
-        const roleParam = urlParams.get('role');
-        
-        if (roleParam === 'admin') {
+        // **WORKAROUND 1: Default to admin mode in development**
+        if (detectedEnvironment.isDevelopment) {
+          console.log('Development environment detected - defaulting to admin mode');
           setUserRole('admin');
         } else {
-          setUserRole('viewer');
+          // In production, check URL params or other logic
+          const urlParams = new URLSearchParams(window.location.search);
+          const roleParam = urlParams.get('role');
+          
+          if (roleParam === 'admin') {
+            setUserRole('admin');
+          } else {
+            setUserRole('viewer');
+          }
         }
         
       } catch (err) {
@@ -203,6 +236,10 @@ function App() {
             <button onClick={() => window.location.reload()}>Retry</button>
             <p style={{ fontSize: '12px', color: '#666', marginTop: '20px' }}>
               Debug info: Base path = "{basePath}", Current URL = {window.location.href}
+              <br />
+              Environment: {environment.isDevelopment ? 'Development' : 'Production'}
+              {environment.isWorkbench && ' (Workbench)'}
+              {environment.isConnect && ' (Connect)'}
             </p>
           </div>
         </Box>
@@ -215,7 +252,7 @@ function App() {
       <CssBaseline />
       <Router basename={basePath}>
         <Box sx={{ display: 'flex', flexDirection: 'column', minHeight: '100vh' }}>
-          <Navbar userRole={userRole} />
+          <Navbar userRole={userRole} environment={environment} />
           
           <Box sx={{ flexGrow: 1, bgcolor: 'background.default' }}>
             <Routes>
