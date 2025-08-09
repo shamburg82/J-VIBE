@@ -1,4 +1,4 @@
-# backend/app/api/routes/documents.py
+# backend/app/api/routes/documents.py (Complete working version)
 from fastapi import APIRouter, HTTPException, Depends, UploadFile, File, BackgroundTasks
 from fastapi.responses import StreamingResponse
 from typing import List, Optional
@@ -6,6 +6,7 @@ import uuid
 import asyncio
 import json
 from datetime import datetime
+import logging
 
 from ...core.models import (
     DocumentUploadRequest, ProcessingStatus, DocumentInfo, 
@@ -13,7 +14,13 @@ from ...core.models import (
 )
 
 router = APIRouter()
+logger = logging.getLogger(__name__)
 
+# Working dependency function
+def get_document_service():
+    """Get document service from main module."""
+    import main
+    return main.get_document_service()
 
 @router.post("/upload", response_model=ProcessingStatus)
 async def upload_document(
@@ -22,13 +29,10 @@ async def upload_document(
     compound: str = None,
     study_id: str = None,
     deliverable: str = None,
-    description: Optional[str] = None
+    description: Optional[str] = None,
+    document_service=Depends(get_document_service)
 ):
     """Upload and process a PDF document."""
-    
-    # Import here to avoid circular imports
-    from ...main import get_document_service
-    document_service = get_document_service()
     
     # Validate required fields
     if not compound:
@@ -49,7 +53,7 @@ async def upload_document(
         # Generate document ID
         document_id = str(uuid.uuid4())
         
-        # FIXED: Read file content completely before starting background task
+        # Read file content completely before starting background task
         file_content = await file.read()
         filename = file.filename
         
@@ -71,26 +75,27 @@ async def upload_document(
         background_tasks.add_task(
             document_service.process_document_async,
             document_id=document_id,
-            file_content=file_content,  # Pass bytes instead of UploadFile
-            filename=filename,          # 
+            file_content=file_content,
+            filename=filename,          
             compound=compound,
             study_id=study_id,
             deliverable=deliverable,
             description=description
         )
         
+        logger.info(f"✅ Document upload started for {filename} -> {document_id}")
         return status
         
     except Exception as e:
+        logger.error(f"❌ Upload failed: {e}")
         raise HTTPException(status_code=500, detail=f"Upload failed: {str(e)}")
 
-
 @router.get("/upload-stream/{document_id}")
-async def stream_processing_status(document_id: str):
+async def stream_processing_status(
+    document_id: str,
+    document_service=Depends(get_document_service)
+):
     """Stream processing status updates for a document."""
-    
-    from ...main import get_document_service
-    document_service = get_document_service()
     
     async def generate_status_stream():
         """Generate status updates as Server-Sent Events."""
@@ -124,13 +129,12 @@ async def stream_processing_status(document_id: str):
         }
     )
 
-
 @router.get("/status/{document_id}", response_model=ProcessingStatus)
-async def get_processing_status(document_id: str):
+async def get_processing_status(
+    document_id: str,
+    document_service=Depends(get_document_service)
+):
     """Get current processing status for a document."""
-    
-    from ...main import get_document_service
-    document_service = get_document_service()
     
     status = await document_service.get_processing_status(document_id)
     if not status:
@@ -138,13 +142,12 @@ async def get_processing_status(document_id: str):
     
     return status
 
-
 @router.get("/info/{document_id}", response_model=DocumentInfo)
-async def get_document_info(document_id: str):
+async def get_document_info(
+    document_id: str,
+    document_service=Depends(get_document_service)
+):
     """Get detailed information about a processed document."""
-    
-    from ...main import get_document_service
-    document_service = get_document_service()
     
     info = await document_service.get_document_info(document_id)
     if not info:
@@ -152,13 +155,11 @@ async def get_document_info(document_id: str):
     
     return info
 
-
 @router.get("/structure")
-async def get_documents_structure():
+async def get_documents_structure(
+    document_service=Depends(get_document_service)
+):
     """Get documents organized by compound/study/deliverable structure."""
-    
-    from ...main import get_document_service
-    document_service = get_document_service()
     
     structure = await document_service.get_documents_by_structure()
     return {
@@ -172,7 +173,6 @@ async def get_documents_structure():
         )
     }
 
-
 @router.get("/list", response_model=List[DocumentInfo])
 async def list_documents(
     limit: int = 50,
@@ -180,12 +180,10 @@ async def list_documents(
     status_filter: Optional[str] = None,
     compound_filter: Optional[str] = None,
     study_filter: Optional[str] = None,
-    deliverable_filter: Optional[str] = None
+    deliverable_filter: Optional[str] = None,
+    document_service=Depends(get_document_service)
 ):
     """List all documents with optional filtering by structure."""
-    
-    from ...main import get_document_service
-    document_service = get_document_service()
     
     documents = await document_service.list_documents(
         limit=limit,
@@ -198,13 +196,11 @@ async def list_documents(
     
     return documents
 
-
 @router.get("/compounds")
-async def get_available_compounds():
+async def get_available_compounds(
+    document_service=Depends(get_document_service)
+):
     """Get list of available compounds."""
-    
-    from ...main import get_document_service
-    document_service = get_document_service()
     
     structure = await document_service.get_documents_by_structure()
     
@@ -232,13 +228,12 @@ async def get_available_compounds():
         "total_compounds": len(compound_summary)
     }
 
-
 @router.get("/studies/{compound}")
-async def get_studies_for_compound(compound: str):
+async def get_studies_for_compound(
+    compound: str,
+    document_service=Depends(get_document_service)
+):
     """Get list of studies for a specific compound."""
-    
-    from ...main import get_document_service
-    document_service = get_document_service()
     
     structure = await document_service.get_documents_by_structure()
     
@@ -265,13 +260,13 @@ async def get_studies_for_compound(compound: str):
         "total_studies": len(study_summary)
     }
 
-
 @router.get("/deliverables/{compound}/{study_id}")
-async def get_deliverables_for_study(compound: str, study_id: str):
+async def get_deliverables_for_study(
+    compound: str, 
+    study_id: str,
+    document_service=Depends(get_document_service)
+):
     """Get list of deliverables for a specific compound and study."""
-    
-    from ...main import get_document_service
-    document_service = get_document_service()
     
     structure = await document_service.get_documents_by_structure()
     
@@ -302,13 +297,14 @@ async def get_deliverables_for_study(compound: str, study_id: str):
         "total_deliverables": len(deliverable_summary)
     }
 
-
 @router.get("/documents/{compound}/{study_id}/{deliverable}")
-async def get_documents_for_deliverable(compound: str, study_id: str, deliverable: str):
+async def get_documents_for_deliverable(
+    compound: str, 
+    study_id: str, 
+    deliverable: str,
+    document_service=Depends(get_document_service)
+):
     """Get all documents for a specific compound/study/deliverable combination."""
-    
-    from ...main import get_document_service
-    document_service = get_document_service()
     
     structure = await document_service.get_documents_by_structure()
     
@@ -331,25 +327,21 @@ async def get_documents_for_deliverable(compound: str, study_id: str, deliverabl
         "document_count": len(documents)
     }
 
-
-
 @router.get("/summary", response_model=DocumentSummary)
-async def get_documents_summary():
+async def get_documents_summary(
+    document_service=Depends(get_document_service)
+):
     """Get summary statistics for all documents."""
-    
-    from ...main import get_document_service
-    document_service = get_document_service()
     
     summary = await document_service.get_documents_summary()
     return summary
 
-
 @router.delete("/{document_id}")
-async def delete_document(document_id: str):
+async def delete_document(
+    document_id: str,
+    document_service=Depends(get_document_service)
+):
     """Delete a document and its associated data."""
-    
-    from ...main import get_document_service
-    document_service = get_document_service()
     
     success = await document_service.delete_document(document_id)
     if not success:
