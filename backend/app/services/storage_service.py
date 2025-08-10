@@ -1,4 +1,5 @@
-# backend/app/services/storage_service.py
+# backend/app/services/storage_service.py - Fixed version
+
 from typing import Dict, List, Optional, Any
 import logging
 from datetime import datetime
@@ -48,16 +49,19 @@ class StorageService:
         """Link a new document ID to an existing document's index (for duplicates)."""
         
         try:
+            # Check if existing index actually exists
             if existing_document_id not in self._indexes:
-                raise ValueError(f"Existing document {existing_document_id} not found")
+                logger.warning(f"Cannot link to non-existent index {existing_document_id}")
+                return False
             
             # Create link to existing index
             self._index_links[new_document_id] = existing_document_id
             
             # Store metadata for the link
+            existing_metadata = self._metadata.get(existing_document_id, {})
             self._metadata[new_document_id] = {
                 "created_at": datetime.now(),
-                "node_count": self._metadata[existing_document_id]["node_count"],
+                "node_count": existing_metadata.get("node_count", 0),
                 "document_id": new_document_id,
                 "linked_to": existing_document_id
             }
