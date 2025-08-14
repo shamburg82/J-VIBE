@@ -1,5 +1,4 @@
-# backend/app/api/routes/documents.py - Complete upload fix
-
+# backend/app/api/routes/documents.py (Complete working version)
 from fastapi import APIRouter, HTTPException, Depends, UploadFile, File, BackgroundTasks, Form, Request
 from fastapi.responses import StreamingResponse, FileResponse
 from typing import List, Optional, AsyncGenerator
@@ -8,7 +7,7 @@ import os
 import uuid
 import asyncio
 import json
-from datetime import datetime, timedelta
+from datetime import datetime
 import logging
 
 from ...core.models import (
@@ -159,6 +158,85 @@ async def upload_document(
         logger.exception("Upload exception details:")
         raise HTTPException(status_code=500, detail=f"Upload failed: {str(e)}")
 
+
+@router.get("/upload-stream/{document_id}")
+async def stream_processing_status(
+    document_id: str,
+    document_service=Depends(get_document_service)
+):
+    """Stream processing status updates for a document."""
+    
+    async def generate_status_stream():
+        """Generate status updates as Server-Sent Events."""
+        try:
+            # Import here to avoid circular imports
+            from ...core.models import ProcessingStatusEnum, ProcessingStatus
+            
+            # First check if document exists
+            doc_info = await document_service.get_document_info(document_id)
+            if not doc_info:
+                yield f"data: {json.dumps({'error': 'Document not found'})}\n\n"
+                return
+            
+            # If already completed, send final status and close
+            if doc_info.status == ProcessingStatusEnum.COMPLETED:
+                final_status = ProcessingStatus(
+                    document_id=document_id,
+                    status=doc_info.status,
+                    progress=100,
+                    message="Processing completed",
+                    created_at=doc_info.created_at,
+                    updated_at=doc_info.processed_at or doc_info.created_at,
+                    total_pages=doc_info.total_pages,
+                    total_chunks=doc_info.total_chunks,
+                    tlf_outputs_found=doc_info.tlf_outputs_found
+                )
+                yield f"data: {final_status.model_dump_json()}\n\n"
+                return
+            
+            # Poll for status updates
+            max_polls = 60  # Maximum 2 minutes of polling
+            poll_count = 0
+            
+            while poll_count < max_polls:
+                status = await document_service.get_processing_status(document_id)
+                
+                if status:
+                    yield f"data: {status.model_dump_json()}\n\n"
+                    
+                    # If completed or failed, end stream
+                    if status.status in [ProcessingStatusEnum.COMPLETED, ProcessingStatusEnum.FAILED]:
+                        break
+                else:
+                    # No status found, send a default one
+                    default_status = ProcessingStatus(
+                        document_id=document_id,
+                        status=ProcessingStatusEnum.PROCESSING,
+                        progress=50,
+                        message="Processing in progress...",
+                        created_at=datetime.now(),
+                        updated_at=datetime.now()
+                    )
+                    yield f"data: {default_status.model_dump_json()}\n\n"
+                
+                # Wait before next update
+                await asyncio.sleep(2)
+                poll_count += 1
+                
+        except Exception as e:
+            logger.error(f"Error in status stream for {document_id}: {e}")
+            yield f"data: {json.dumps({'error': str(e)})}\n\n"
+    
+    return StreamingResponse(
+        generate_status_stream(),
+        media_type="text/plain",
+        headers={
+            "Cache-Control": "no-cache",
+            "Connection": "keep-alive",
+        }
+    )
+
+
 @router.get("/status/{document_id}", response_model=ProcessingStatus)
 async def get_processing_status(
     document_id: str,
@@ -211,7 +289,24 @@ async def get_document_info(
         raise
     except Exception as e:
         logger.error(f"Error getting document info for {document_id}: {e}")
-        raise HTTPException(status_code=500, detail=f"Failed to get document info: {str(e)}")
+
+@router.get("/structure")
+async def get_documents_structure(
+    document_service=Depends(get_document_service)
+):
+    """Get documents organized by compound/study/deliverable structure."""
+    
+    structure = await document_service.get_documents_by_structure()
+    return {
+        "structure": structure,
+        "compounds": list(structure.keys()),
+        "total_compounds": len(structure),
+        "total_studies": sum(len(studies) for studies in structure.values()),
+        "total_deliverables": sum(
+            sum(len(deliverables) for deliverables in studies.values()) 
+            for studies in structure.values()
+        )
+    }
 
 @router.get("/list", response_model=List[DocumentInfo])
 async def list_documents(
@@ -402,83 +497,6 @@ async def get_documents_for_deliverable(
         logger.error(f"Error getting documents for {compound}/{study_id}/{deliverable}: {e}")
         raise HTTPException(status_code=500, detail=f"Failed to get documents: {str(e)}")
 
-@router.get("/upload-stream/{document_id}")
-async def stream_processing_status(
-    document_id: str,
-    document_service=Depends(get_document_service)
-):
-    """Stream processing status updates for a document."""
-    
-    async def generate_status_stream():
-        """Generate status updates as Server-Sent Events."""
-        try:
-            # Import here to avoid circular imports
-            from ...core.models import ProcessingStatusEnum, ProcessingStatus
-            
-            # First check if document exists
-            doc_info = await document_service.get_document_info(document_id)
-            if not doc_info:
-                yield f"data: {json.dumps({'error': 'Document not found'})}\n\n"
-                return
-            
-            # If already completed, send final status and close
-            if doc_info.status == ProcessingStatusEnum.COMPLETED:
-                final_status = ProcessingStatus(
-                    document_id=document_id,
-                    status=doc_info.status,
-                    progress=100,
-                    message="Processing completed",
-                    created_at=doc_info.created_at,
-                    updated_at=doc_info.processed_at or doc_info.created_at,
-                    total_pages=doc_info.total_pages,
-                    total_chunks=doc_info.total_chunks,
-                    tlf_outputs_found=doc_info.tlf_outputs_found
-                )
-                yield f"data: {final_status.model_dump_json()}\n\n"
-                return
-            
-            # Poll for status updates
-            max_polls = 60  # Maximum 2 minutes of polling
-            poll_count = 0
-            
-            while poll_count < max_polls:
-                status = await document_service.get_processing_status(document_id)
-                
-                if status:
-                    yield f"data: {status.model_dump_json()}\n\n"
-                    
-                    # If completed or failed, end stream
-                    if status.status in [ProcessingStatusEnum.COMPLETED, ProcessingStatusEnum.FAILED]:
-                        break
-                else:
-                    # No status found, send a default one
-                    default_status = ProcessingStatus(
-                        document_id=document_id,
-                        status=ProcessingStatusEnum.PROCESSING,
-                        progress=50,
-                        message="Processing in progress...",
-                        created_at=datetime.now(),
-                        updated_at=datetime.now()
-                    )
-                    yield f"data: {default_status.model_dump_json()}\n\n"
-                
-                # Wait before next update
-                await asyncio.sleep(2)
-                poll_count += 1
-                
-        except Exception as e:
-            logger.error(f"Error in status stream for {document_id}: {e}")
-            yield f"data: {json.dumps({'error': str(e)})}\n\n"
-    
-    return StreamingResponse(
-        generate_status_stream(),
-        media_type="text/plain",
-        headers={
-            "Cache-Control": "no-cache",
-            "Connection": "keep-alive",
-        }
-    )
-
 @router.get("/summary", response_model=DocumentSummary)
 async def get_documents_summary(
     document_service=Depends(get_document_service)
@@ -493,9 +511,20 @@ async def get_documents_summary(
         logger.error(f"Error getting documents summary: {e}")
         raise HTTPException(status_code=500, detail=f"Failed to get summary: {str(e)}")
 
+@router.delete("/{document_id}")
+async def delete_document(
+    document_id: str,
+    document_service=Depends(get_document_service)
+):
+    """Delete a document and its associated data."""
+    
+    success = await document_service.delete_document(document_id)
+    if not success:
+        raise HTTPException(status_code=404, detail="Document not found")
+    
+    return {"message": "Document deleted successfully"}
 
-
-# Add this new endpoint for serving PDF files
+# Serve PDF files
 @router.get("/serve/{document_id}")
 async def serve_pdf_file(
     document_id: str,
@@ -534,7 +563,6 @@ async def serve_pdf_file(
         logger.error(f"Error serving PDF file for document {document_id}: {e}")
         raise HTTPException(status_code=500, detail=f"Failed to serve file: {str(e)}")
 
-# Check if document is ready for chat
 @router.get("/chat-ready/{document_id}")
 async def check_document_chat_ready(
     document_id: str,
