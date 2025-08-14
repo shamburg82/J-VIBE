@@ -29,7 +29,7 @@ class Config:
     # Processing Settings
     chunk_size: int = 512
     chunk_overlap: int = 50
-    confidence_threshold: float = 0.7,
+    confidence_threshold: float = 0.7
 
     use_vector_store: bool = True
     
