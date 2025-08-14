@@ -84,6 +84,12 @@ class DocumentService:
             SummaryExtractor(summaries=["self"], llm=llm),
             KeywordExtractor(keywords=8, llm=llm),
         ]
+    
+        # Extractor configuration flags
+        self.enable_keyword_extraction = getattr(config, 'enable_keyword_extraction', True) if config else True
+        self.enable_question_extraction = getattr(config, 'enable_question_extraction', True) if config else True
+        self.enable_summary_extraction = getattr(config, 'enable_summary_extraction', False) if config else False
+        
 
         # Load existing documents from manifest
         self._restore_documents_from_manifest()
@@ -198,27 +204,186 @@ class DocumentService:
             f"Chunking document ({total_pages} pages)...",
             total_pages=total_pages
         )
-        
-        # Create processing pipeline
-        transformations = [self.text_splitter, self.tlf_extractor]
-        pipeline = IngestionPipeline(transformations=transformations)
-        
+    
+        # Create nodes directly using the text splitter first
         try:
-            doc_nodes = await asyncio.get_event_loop().run_in_executor(
-                None, pipeline.run, documents
+            # First create initial nodes from documents
+            from llama_index.core.schema import TextNode
+            initial_nodes = []
+            
+            for doc_idx, doc in enumerate(documents):
+                # Split text into chunks first
+                text_chunks = self.text_splitter.split_text(doc.text)
+                
+                for chunk_idx, chunk_text in enumerate(text_chunks):
+                    if chunk_text.strip():
+                        node = TextNode(
+                            text=chunk_text,
+                            id_=f"{document_id}_doc{doc_idx}_chunk{chunk_idx}",
+                            metadata={
+                                "document_id": document_id,
+                                "page_number": doc.metadata.get("page_label", doc_idx + 1),
+                                "source": doc.metadata.get("file_name", stored_file_path.name),
+                                "doc_idx": doc_idx,
+                                "chunk_idx": chunk_idx
+                            }
+                        )
+                        initial_nodes.append(node)
+            
+            logger.info(f"Created {len(initial_nodes)} initial nodes")
+            
+            if not initial_nodes:
+                raise ValueError("No text chunks created")
+            
+            await self._update_status(
+                document_id, ProcessingStatusEnum.EXTRACTING_TLF_METADATA, 50,
+                f"Extracting metadata from {len(initial_nodes)} chunks..."
             )
-        except Exception as pipeline_error:
-            logger.error(f"Pipeline processing failed: {pipeline_error}")
-            doc_nodes = await self._manual_document_processing(documents)
+        
+            # Apply extractors directly without the problematic pipeline
+            logger.info("Running extraction pipeline...")
+            
+            # Apply TLF extraction first (most important)
+            doc_nodes = self.tlf_extractor(initial_nodes)
+            logger.info(f"TLF extraction complete, {len(doc_nodes)} nodes")
+            
+            # Then apply other extractors if enabled
+            try:
+                from llama_index.core.extractors import KeywordExtractor, QuestionsAnsweredExtractor
+                
+                # Apply keyword extraction in batches
+                if self.llm and getattr(self, 'enable_keyword_extraction', True):
+                    await self._update_status(
+                        document_id, ProcessingStatusEnum.EXTRACTING_TLF_METADATA, 60,
+                        "Extracting keywords..."
+                    )
+                    
+                    keyword_extractor = KeywordExtractor(keywords=10, llm=self.llm)
+                    
+                    # Process in smaller batches to show progress
+                    batch_size = 10
+                    for i in range(0, len(doc_nodes), batch_size):
+                        batch = doc_nodes[i:i+batch_size]
+                        progress = 60 + int((i / len(doc_nodes)) * 10)  # 60-70% for keywords
+                        
+                        await self._update_status(
+                            document_id, ProcessingStatusEnum.EXTRACTING_TLF_METADATA, progress,
+                            f"Extracting keywords: {i+1}-{min(i+batch_size, len(doc_nodes))}/{len(doc_nodes)}..."
+                        )
+                        
+                        # Apply keyword extraction to batch
+                        try:
+                            # Keyword extractor modifies nodes in place
+                            keyword_extractor(batch)
+                        except Exception as ke:
+                            logger.warning(f"Keyword extraction failed for batch: {ke}")
+                    
+                    logger.info("Keyword extraction complete")
+                
+                # Apply question extraction if enabled
+                if self.llm and getattr(self, 'enable_question_extraction', True):
+                    await self._update_status(
+                        document_id, ProcessingStatusEnum.EXTRACTING_TLF_METADATA, 70,
+                        "Generating questions..."
+                    )
+                    
+                    question_extractor = QuestionsAnsweredExtractor(
+                        questions=3,
+                        llm=self.llm,
+                        prompt_template="""
+                        Given the following clinical trial text, generate {num_questions} questions 
+                        that this text can answer. Focus on clinical, statistical, and regulatory aspects.
+                        
+                        Text: {context_str}
+                        
+                        Questions:
+                        """
+                    )
+                    
+                    # Process in smaller batches
+                    batch_size = 5  # Smaller batches for question generation (more expensive)
+                    for i in range(0, len(doc_nodes), batch_size):
+                        batch = doc_nodes[i:i+batch_size]
+                        progress = 70 + int((i / len(doc_nodes)) * 10)  # 70-80% for questions
+                        
+                        await self._update_status(
+                            document_id, ProcessingStatusEnum.EXTRACTING_TLF_METADATA, progress,
+                            f"Generating questions: {i+1}-{min(i+batch_size, len(doc_nodes))}/{len(doc_nodes)}..."
+                        )
+                        
+                        try:
+                            # Question extractor modifies nodes in place
+                            question_extractor(batch)
+                        except Exception as qe:
+                            logger.warning(f"Question extraction failed for batch: {qe}")
+                    
+                    logger.info("Question extraction complete")
+                
+            except Exception as extractor_error:
+                logger.warning(f"Additional extractors failed: {extractor_error}, continuing with TLF metadata only")
+            
+            # Verify we have nodes
+            if not doc_nodes:
+                raise ValueError("No nodes after extraction")
+            
+            # Log sample metadata
+            if doc_nodes:
+                sample_metadata = doc_nodes[0].metadata
+                logger.info(f"Sample node metadata keys: {list(sample_metadata.keys())}")
+                if 'keywords' in sample_metadata:
+                    logger.info(f"Sample keywords: {sample_metadata.get('keywords', [])[:5]}")
+                if 'questions_this_excerpt_can_answer' in sample_metadata:
+                    logger.info(f"Sample questions: {sample_metadata.get('questions_this_excerpt_can_answer', [])[:2]}")
+            
+        except Exception as processing_error:
+            logger.error(f"Processing error: {processing_error}")
+            logger.exception("Full processing error:")
+            
+            # Fallback: Create basic nodes with TLF extraction only
+            logger.info("Falling back to basic TLF extraction")
+            from llama_index.core.schema import TextNode
+            doc_nodes = []
+            
+            total_docs = len(documents)
+            for doc_idx, doc in enumerate(documents):
+                progress = 50 + int((doc_idx / total_docs) * 30)
+                await self._update_status(
+                    document_id, ProcessingStatusEnum.EXTRACTING_TLF_METADATA, progress,
+                    f"Processing document {doc_idx+1}/{total_docs} (fallback mode)..."
+                )
+                
+                text_chunks = self.text_splitter.split_text(doc.text)
+                
+                for chunk_idx, chunk_text in enumerate(text_chunks):
+                    if chunk_text.strip():
+                        node = TextNode(
+                            text=chunk_text,
+                            id_=f"{document_id}_fallback_{doc_idx}_{chunk_idx}",
+                            metadata={
+                                "document_id": document_id,
+                                "page_number": doc.metadata.get("page_label", doc_idx + 1),
+                                "source": stored_file_path.name
+                            }
+                        )
+                        doc_nodes.append(node)
+            
+            # Apply TLF extraction
+            if doc_nodes:
+                await self._update_status(
+                    document_id, ProcessingStatusEnum.EXTRACTING_TLF_METADATA, 75,
+                    f"Applying TLF extraction to {len(doc_nodes)} nodes..."
+                )
+                doc_nodes = self.tlf_extractor(doc_nodes)
+                logger.info(f"Fallback: Applied TLF extraction to {len(doc_nodes)} nodes")
         
         if not doc_nodes:
-            raise ValueError("No text chunks were created from the PDF content")
+            raise ValueError("No nodes created from document")
         
         await self._update_status(
             document_id, ProcessingStatusEnum.BUILDING_INDEX, 85,
-            "Building vector index..."
+            f"Building vector index with {len(doc_nodes)} nodes..."
         )
-            
+        
         # Store in vector index
         await self.storage_service.create_index(document_id, doc_nodes)
         
@@ -245,56 +410,6 @@ class DocumentService:
         self._add_to_manifest(document_id, doc_info)
         
         logger.info(f"Successfully processed document {document_id} with vector store")
-
-    async def _process_without_vector_store(self, document_id: str, stored_file_path: Path, doc_info: DocumentInfo):
-        """Minimal processing without vector store (workaround method)."""
-        
-        await self._update_status(
-            document_id, ProcessingStatusEnum.EXTRACTING_TEXT, 20,
-            "Extracting basic document info (vector store disabled)..."
-        )
-        
-        try:
-            # Basic PDF info extraction
-            documents = SimpleDirectoryReader(input_files=[str(stored_file_path)]).load_data()
-            if not documents:
-                raise ValueError("PDF contains no extractable text")
-                
-            total_pages = len(documents)
-            doc_info.total_pages = total_pages
-            
-            # Estimate chunks and TLF outputs based on page count
-            estimated_chunks = total_pages * 3  # Rough estimate
-            estimated_tlf_outputs = max(1, total_pages // 5)  # Rough estimate
-            
-            doc_info.total_chunks = estimated_chunks
-            doc_info.tlf_outputs_found = estimated_tlf_outputs
-            doc_info.tlf_types_distribution = {"table": estimated_tlf_outputs // 2, "listing": estimated_tlf_outputs // 3, "figure": estimated_tlf_outputs // 5}
-            doc_info.clinical_domains_distribution = {"demographics": 1, "safety": 1, "efficacy": 1}
-            
-        except Exception as e:
-            logger.warning(f"Basic PDF processing failed: {e}")
-            # Still mark as completed with minimal info
-            doc_info.total_pages = 0
-            doc_info.total_chunks = 0
-            doc_info.tlf_outputs_found = 0
-        
-        # Mark as completed
-        doc_info.status = ProcessingStatusEnum.COMPLETED
-        doc_info.processed_at = datetime.now()
-        
-        await self._update_status(
-            document_id, ProcessingStatusEnum.COMPLETED, 100,
-            f"File stored successfully! ({doc_info.total_pages} pages) - Note: Full processing disabled.",
-            total_pages=doc_info.total_pages,
-            total_chunks=doc_info.total_chunks,
-            tlf_outputs_found=doc_info.tlf_outputs_found
-        )
-        
-        # Update manifest
-        self._add_to_manifest(document_id, doc_info)
-        
-        logger.info(f"Document {document_id} stored with minimal processing (vector store disabled)")
 
     async def _manual_document_processing(self, documents) -> List:
         """Manual fallback processing when pipeline fails."""
