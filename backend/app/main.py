@@ -36,7 +36,7 @@ async def lifespan(app: FastAPI):
     """Application lifespan manager - startup and shutdown."""
     
     # Startup
-    logger.info("🚀 Starting TLF Analyzer API")
+    logger.info("🚀 Starting Jazz VIBE API")
     
     try:
         # Detect environment and get appropriate config
@@ -111,18 +111,22 @@ async def lifespan(app: FastAPI):
 
 # Create FastAPI app with lifespan
 app = FastAPI(
-    title="TLF Analyzer API",
-    description="API for processing and querying clinical trial TLF documents",
+    title="Jazz VIBE API",
+    description="API for processing and querying TLF documents",
     version="1.0.0",
     lifespan=lifespan,
     # Posit Workbench/Connect compatibility
-    root_path=os.getenv("FASTAPI_ROOT_PATH", "")
+    root_path=os.getenv("UVICORN_ROOT_PATH", "")
 )
 
 # Configure CORS
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["http://localhost:3000", "http://localhost:5173"],  # React dev servers
+    allow_origins=[
+        "https://dse-prod-wb.jazzpharma.com",
+        "https://dse-prod-cn.jazzpharma.com",
+        "http://localhost:3000", 
+        "http://localhost:5173"],  # React dev servers
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -139,10 +143,12 @@ app.include_router(chat.router, prefix="/api/v1/chat", tags=["chat"])
 @app.get("/")
 async def root():
     return {
-        "message": "Clinical TLF Analyzer API",
+        "message": "Jazz VIBE API",
         "version": "1.0.0",
-        "docs": "/docs",
-        "health": "/api/v1/health"
+        "docs": "/docs",       
+        "proxy_path": f"{os.getenv('FASTAPI_ROOT_PATH', '')}",   # Workbench Backend path
+        # "proxy_path": "/content/855d4b4d-6d26-4f10-afc1-09e58f721fff",  # Connect Backend path
+        "health": "/api/v1/health", 
     }
 
 
@@ -267,6 +273,151 @@ async def get_chat_examples():
             "Ask about statistical significance and confidence intervals"
         ]
     }
+
+@app.get("/api/v1/config/vector-store")
+async def get_vector_store_config():
+    """Get current vector store configuration."""
+    
+    try:
+        config = await document_service.get_vector_store_status()
+        return {
+            "vector_store_config": config,
+            "timestamp": datetime.now()
+        }
+    except Exception as e:
+        logger.error(f"Error getting vector store config: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.post("/api/v1/config/vector-store/enable")
+async def enable_vector_store():
+    """Enable vector store processing for future uploads."""
+    
+    try:
+        document_service.enable_vector_store()
+        config = await document_service.get_vector_store_status()
+        
+        return {
+            "message": "Vector store processing enabled",
+            "config": config,
+            "timestamp": datetime.now()
+        }
+    except Exception as e:
+        logger.error(f"Error enabling vector store: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.post("/api/v1/config/vector-store/disable")
+async def disable_vector_store():
+    """Disable vector store processing (files only mode)."""
+    
+    try:
+        document_service.disable_vector_store()
+        config = await document_service.get_vector_store_status()
+        
+        return {
+            "message": "Vector store processing disabled - files only mode",
+            "config": config,
+            "timestamp": datetime.now()
+        }
+    except Exception as e:
+        logger.error(f"Error disabling vector store: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.get("/api/v1/admin/manifest")
+async def get_document_manifest():
+    """Get the raw document manifest for debugging."""
+    
+    try:
+        manifest_path = document_service.manifest_file
+        if manifest_path.exists():
+            with open(manifest_path, 'r') as f:
+                manifest = json.load(f)
+            return {
+                "manifest": manifest,
+                "manifest_path": str(manifest_path),
+                "file_size": manifest_path.stat().st_size,
+                "last_modified": datetime.fromtimestamp(manifest_path.stat().st_mtime).isoformat()
+            }
+        else:
+            return {
+                "manifest": None,
+                "manifest_path": str(manifest_path),
+                "exists": False
+            }
+    except Exception as e:
+        logger.error(f"Error reading manifest: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.post("/api/v1/admin/rebuild-manifest")
+async def rebuild_document_manifest():
+    """Rebuild the document manifest from existing files (recovery function)."""
+    
+    try:
+        # This would scan the storage directory and rebuild the manifest
+        # Useful for recovery scenarios
+        
+        storage_path = document_service.base_storage_path
+        if not storage_path.exists():
+            raise HTTPException(status_code=404, detail="Storage path does not exist")
+        
+        rebuilt_count = 0
+        errors = []
+        
+        # Scan directory structure
+        for compound_dir in storage_path.iterdir():
+            if not compound_dir.is_dir():
+                continue
+                
+            for study_dir in compound_dir.iterdir():
+                if not study_dir.is_dir():
+                    continue
+                    
+                for deliverable_dir in study_dir.iterdir():
+                    if not deliverable_dir.is_dir():
+                        continue
+                    
+                    for file_path in deliverable_dir.glob("*.pdf"):
+                        try:
+                            # Create minimal document entry
+                            file_hash = hashlib.sha256(file_path.read_bytes()).hexdigest()
+                            doc_id = str(uuid.uuid4())
+                            
+                            doc_info = DocumentInfo(
+                                document_id=doc_id,
+                                filename=file_path.name,
+                                compound=compound_dir.name,
+                                study_id=study_dir.name,
+                                deliverable=deliverable_dir.name,
+                                file_path=str(file_path),
+                                file_hash=file_hash,
+                                status=ProcessingStatusEnum.COMPLETED,
+                                created_at=datetime.fromtimestamp(file_path.stat().st_ctime),
+                                processed_at=datetime.fromtimestamp(file_path.stat().st_mtime),
+                                total_pages=0,  # Would need PDF parsing to get actual count
+                                total_chunks=0,
+                                tlf_outputs_found=0,
+                                tlf_types_distribution={},
+                                clinical_domains_distribution={}
+                            )
+                            
+                            document_service._document_info[doc_id] = doc_info
+                            document_service._document_hashes[file_hash] = doc_id
+                            document_service._add_to_manifest(doc_id, doc_info)
+                            
+                            rebuilt_count += 1
+                            
+                        except Exception as file_error:
+                            errors.append(f"Failed to process {file_path}: {str(file_error)}")
+        
+        return {
+            "message": f"Manifest rebuilt with {rebuilt_count} documents",
+            "rebuilt_count": rebuilt_count,
+            "errors": errors,
+            "timestamp": datetime.now()
+        }
+        
+    except Exception as e:
+        logger.error(f"Error rebuilding manifest: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
 
 
 if __name__ == "__main__":
