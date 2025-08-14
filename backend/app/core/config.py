@@ -30,6 +30,12 @@ class Config:
     chunk_size: int = 512
     chunk_overlap: int = 50
     confidence_threshold: float = 0.7
+    
+    # Extractor configuration flags
+    enable_keyword_extraction: bool = False
+    enable_question_extraction: bool = False
+    enable_summary_extraction: bool = False
+        
 
     use_vector_store: bool = True
     
