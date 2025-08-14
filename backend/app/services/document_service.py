@@ -44,7 +44,7 @@ class DocumentService:
         
         logger.info(f"DocumentService initialized with storage path: {self.base_storage_path}")
         
-        # **WORKAROUND 2: File persistence tracking**
+        # **WORKAROUND: File persistence tracking**
         # Create a manifest file to track uploaded documents even without vector store
         self.manifest_file = self.base_storage_path / "document_manifest.json"
         self.file_manifest = self._load_manifest()
@@ -58,7 +58,7 @@ class DocumentService:
         self._document_info: Dict[str, DocumentInfo] = {}
 
         # Document hash tracking for deduplication
-        self._document_hashes: Dict[str, str] = {}  # hash -> document_id
+        self._document_hashes: Dict[str, str] = {}
 
         # Initialize TLF extractor
         confidence_threshold = getattr(config,'confidence_threshold', 0.7)
@@ -88,103 +88,6 @@ class DocumentService:
         # Load existing documents from manifest
         self._restore_documents_from_manifest()
 
-    def _load_manifest(self) -> Dict[str, Any]:
-        """Load the document manifest from file."""
-        try:
-            if self.manifest_file.exists():
-                with open(self.manifest_file, 'r') as f:
-                    manifest = json.load(f)
-                logger.info(f"Loaded manifest with {len(manifest.get('documents', {}))} documents")
-                return manifest
-        except Exception as e:
-            logger.warning(f"Failed to load manifest: {e}")
-        
-        return {
-            "version": "1.0",
-            "created": datetime.now().isoformat(),
-            "documents": {}
-        }
-
-    def _save_manifest(self):
-        """Save the document manifest to file."""
-        try:
-            self.manifest_file.parent.mkdir(parents=True, exist_ok=True)
-            self.manifest_file.write_text(json.dumps(self.file_manifest, indent=2, default=str))
-            logger.debug("Manifest saved successfully")
-        except Exception as e:
-            logger.error(f"Failed to save manifest: {e}")
-
-    def _add_to_manifest(self, document_id: str, document_info: DocumentInfo):
-        """Add a document to the manifest."""
-        self.file_manifest["documents"][document_id] = {
-            "document_id": document_id,
-            "filename": document_info.filename,
-            "compound": document_info.compound,
-            "study_id": document_info.study_id,
-            "deliverable": document_info.deliverable,
-            "file_path": str(document_info.file_path) if document_info.file_path else None,
-            "file_hash": document_info.file_hash,
-            "description": document_info.description,
-            "status": document_info.status,
-            "created_at": document_info.created_at.isoformat(),
-            "processed_at": document_info.processed_at.isoformat() if document_info.processed_at else None,
-            "total_pages": document_info.total_pages,
-            "total_chunks": document_info.total_chunks,
-            "tlf_outputs_found": document_info.tlf_outputs_found,
-            "tlf_types_distribution": document_info.tlf_types_distribution,
-            "clinical_domains_distribution": document_info.clinical_domains_distribution,
-            "has_vector_index": self.use_vector_store,
-        }
-        self._save_manifest()
-
-    def _remove_from_manifest(self, document_id: str):
-        """Remove a document from the manifest."""
-        if document_id in self.file_manifest["documents"]:
-            del self.file_manifest["documents"][document_id]
-            self._save_manifest()
-
-    def _restore_documents_from_manifest(self):
-        """Restore document info from manifest on startup."""
-        for doc_id, doc_data in self.file_manifest["documents"].items():
-            try:
-                # Convert back to DocumentInfo object
-                doc_info = DocumentInfo(
-                    document_id=doc_data["document_id"],
-                    filename=doc_data["filename"],
-                    compound=doc_data.get("compound"),
-                    study_id=doc_data.get("study_id"),
-                    deliverable=doc_data.get("deliverable"),
-                    file_path=doc_data.get("file_path"),
-                    file_hash=doc_data.get("file_hash"),
-                    description=doc_data.get("description"),
-                    status=ProcessingStatusEnum(doc_data["status"]),
-                    created_at=datetime.fromisoformat(doc_data["created_at"]),
-                    processed_at=datetime.fromisoformat(doc_data["processed_at"]) if doc_data.get("processed_at") else None,
-                    total_pages=doc_data.get("total_pages"),
-                    total_chunks=doc_data.get("total_chunks", 0),
-                    tlf_outputs_found=doc_data.get("tlf_outputs_found", 0),
-                    tlf_types_distribution=doc_data.get("tlf_types_distribution", {}),
-                    clinical_domains_distribution=doc_data.get("clinical_domains_distribution", {}),
-                )
-                
-                self._document_info[doc_id] = doc_info
-                
-                # Add to hash tracking if available
-                if doc_info.file_hash:
-                    self._document_hashes[doc_info.file_hash] = doc_id
-                
-                # Check if file still exists
-                if doc_info.file_path and not Path(doc_info.file_path).exists():
-                    logger.warning(f"File missing for document {doc_id}: {doc_info.file_path}")
-                    # Update status to indicate file is missing
-                    doc_info.status = ProcessingStatusEnum.FAILED
-                    doc_data["status"] = "failed"
-                    
-            except Exception as e:
-                logger.error(f"Failed to restore document {doc_id} from manifest: {e}")
-        
-        logger.info(f"Restored {len(self._document_info)} documents from manifest")
-
     async def process_document_async(
         self,
         document_id: str,
@@ -206,7 +109,7 @@ class DocumentService:
                         
             # Generate file hash for deduplication
             file_hash = hashlib.sha256(file_content).hexdigest()
-            
+        
             # Check for existing document with same hash
             existing_doc_id = self._document_hashes.get(file_hash)
             if existing_doc_id and existing_doc_id in self._document_info:
@@ -224,7 +127,7 @@ class DocumentService:
                 file_content, filename, compound, study_id, deliverable
             )
             
-            # **WORKAROUND 2: Always create document info, even without vector processing**
+            # **WORKAROUND: Always create document info, even without vector processing**
             doc_info = DocumentInfo(
                 document_id=document_id,
                 filename=filename,         
@@ -393,43 +296,6 @@ class DocumentService:
         
         logger.info(f"Document {document_id} stored with minimal processing (vector store disabled)")
 
-    async def get_documents_by_structure(self) -> Dict[str, Any]:
-        """Get documents organized by compound/study/deliverable structure."""
-        
-        structure = {}
-        
-        for doc in self._document_info.values():
-            # **WORKAROUND 2: Include all documents from manifest, even without vector store**
-            if not hasattr(doc, 'compound') or not doc.compound:
-                continue
-                
-            compound = doc.compound
-            study = doc.study_id
-            deliverable = doc.deliverable
-            
-            if compound not in structure:
-                structure[compound] = {}
-            if study not in structure[compound]:
-                structure[compound][study] = {}
-            if deliverable not in structure[compound][study]:
-                structure[compound][study][deliverable] = []
-            
-            # Include additional metadata about vector store availability
-            doc_entry = {
-                "document_id": doc.document_id,
-                "filename": doc.filename,
-                "status": doc.status,
-                "tlf_outputs_found": doc.tlf_outputs_found,
-                "created_at": doc.created_at,
-                "processed_at": doc.processed_at,
-                "has_vector_index": self.use_vector_store and doc.status == ProcessingStatusEnum.COMPLETED,
-                "file_exists": Path(doc.file_path).exists() if doc.file_path else False,
-            }
-            
-            structure[compound][study][deliverable].append(doc_entry)
-        
-        return structure
-
     async def _manual_document_processing(self, documents) -> List:
         """Manual fallback processing when pipeline fails."""
         logger.info("Starting manual document processing fallback")
@@ -465,6 +331,7 @@ class DocumentService:
         except Exception as e:
             logger.error(f"Manual document processing failed: {e}")
             return []
+
 
     async def _store_file_permanently(
         self,
@@ -560,8 +427,8 @@ class DocumentService:
     ):
         """Handle case where document with same content already exists."""
         
-        existing_doc = self._document_info.get(existing_document_id)
-        
+        existing_doc = self._document_info[existing_document_id]
+    
         if not existing_doc:
             logger.warning(f"Existing document {existing_document_id} not found in memory, treating as new document")
             # Don't treat as duplicate if we can't find the existing document
@@ -602,7 +469,7 @@ class DocumentService:
         
         # Add to manifest
         self._add_to_manifest(new_document_id, duplicate_doc_info)
-        
+    
         # Point to same vector index if using vector store
         if self.use_vector_store and existing_document_id in self._document_info:
             try:
@@ -612,6 +479,7 @@ class DocumentService:
         
         logger.info(f"Document {new_document_id} is duplicate of {existing_document_id}")
         return True
+
 
     async def _update_status(
         self,
@@ -675,52 +543,6 @@ class DocumentService:
             "domains": clinical_domains
         }
 
-    # **WORKAROUND 2: Enhanced methods to work with or without vector store**
-    
-    async def delete_document(self, document_id: str) -> bool:
-        """Delete a document and its associated data."""
-        
-        try:
-            doc_info = self._document_info.get(document_id)
-            
-            # Remove from vector storage if using vector store
-            if self.use_vector_store:
-                await self.storage_service.delete_index(document_id)
-            
-            # Remove physical file if it exists and no other documents reference it
-            if doc_info and hasattr(doc_info, 'file_path'):
-                file_path = Path(doc_info.file_path)
-                if file_path.exists():
-                    # Check if any other documents reference this file
-                    other_docs_with_same_file = [
-                        d for d in self._document_info.values()
-                        if (d.document_id != document_id and 
-                            hasattr(d, 'file_path') and 
-                            d.file_path == doc_info.file_path)
-                    ]
-                    
-                    if not other_docs_with_same_file:
-                        file_path.unlink()
-                        logger.info(f"Deleted file: {file_path}")
-            
-            # Remove from hash tracking
-            if doc_info and hasattr(doc_info, 'file_hash'):
-                self._document_hashes.pop(doc_info.file_hash, None)
-            
-            # Remove from manifest
-            self._remove_from_manifest(document_id)
-            
-            # Remove from local tracking
-            self._processing_status.pop(document_id, None)
-            self._document_info.pop(document_id, None)
-            
-            return True
-            
-        except Exception as e:
-            logger.error(f"Error deleting document {document_id}: {e}")
-            return False
-
-    
     async def get_processing_status(self, document_id: str) -> Optional[ProcessingStatus]:
         """Get current processing status for a document."""
         status = self._processing_status.get(document_id)
@@ -782,6 +604,42 @@ class DocumentService:
         # Apply pagination
         return documents[offset:offset + limit]
 
+    async def get_documents_by_structure(self) -> Dict[str, Any]:
+        """Get documents organized by compound/study/deliverable structure."""
+        
+        structure = {}
+        
+        for doc in self._document_info.values():
+            if not hasattr(doc, 'compound'):
+                continue
+                
+            compound = doc.compound
+            study = doc.study_id
+            deliverable = doc.deliverable
+            
+            if compound not in structure:
+                structure[compound] = {}
+            if study not in structure[compound]:
+                structure[compound][study] = {}
+            if deliverable not in structure[compound][study]:
+                structure[compound][study][deliverable] = []
+            
+            
+            doc_entry = {
+                "document_id": doc.document_id,
+                "filename": doc.filename,
+                "status": doc.status,
+                "tlf_outputs_found": doc.tlf_outputs_found,
+                "created_at": doc.created_at,
+                "processed_at": doc.processed_at,
+                "has_vector_index": self.use_vector_store and doc.status == ProcessingStatusEnum.COMPLETED,
+                "file_exists": Path(doc.file_path).exists() if doc.file_path else False,
+            }
+            
+            structure[compound][study][deliverable].append(doc_entry)
+        
+        return structure
+
     async def get_documents_summary(self) -> DocumentSummary:
         """Get summary statistics for all documents."""
         
@@ -806,6 +664,49 @@ class DocumentService:
             recent_documents=recent_documents
         )
 
+    async def delete_document(self, document_id: str) -> bool:
+        """Delete a document and its associated data."""
+        
+        try:
+            doc_info = self._document_info.get(document_id)
+            
+            # Remove from vector storage if using vector store
+            if self.use_vector_store:
+                await self.storage_service.delete_index(document_id)
+            
+            # Remove physical file if it exists and no other documents reference it
+            if doc_info and hasattr(doc_info, 'file_path'):
+                file_path = Path(doc_info.file_path)
+                if file_path.exists():
+                    # Check if any other documents reference this file
+                    other_docs_with_same_file = [
+                        d for d in self._document_info.values()
+                        if (d.document_id != document_id and 
+                            hasattr(d, 'file_path') and 
+                            d.file_path == doc_info.file_path)
+                    ]
+                    
+                    if not other_docs_with_same_file:
+                        file_path.unlink()
+                        logger.info(f"Deleted file: {file_path}")
+            
+            # Remove from hash tracking
+            if doc_info and hasattr(doc_info, 'file_hash'):
+                self._document_hashes.pop(doc_info.file_hash, None)
+                
+            # Remove from manifest
+            self._remove_from_manifest(document_id)
+            
+            # Remove from local tracking
+            self._processing_status.pop(document_id, None)
+            self._document_info.pop(document_id, None)
+            
+            return True
+            
+        except Exception as e:
+            logger.error(f"Error deleting document {document_id}: {e}")
+            return False
+
     async def get_document_count(self) -> int:
         """Get total document count."""
         return len(self._document_info)
@@ -828,7 +729,104 @@ class DocumentService:
         
         return total_time / len(completed_docs)
 
-    # **WORKAROUND 2: Methods to toggle vector store usage**
+    def _load_manifest(self) -> Dict[str, Any]:
+        """Load the document manifest from file."""
+        try:
+            if self.manifest_file.exists():
+                with open(self.manifest_file, 'r') as f:
+                    manifest = json.load(f)
+                logger.info(f"Loaded manifest with {len(manifest.get('documents', {}))} documents")
+                return manifest
+        except Exception as e:
+            logger.warning(f"Failed to load manifest: {e}")
+        
+        return {
+            "version": "1.0",
+            "created": datetime.now().isoformat(),
+            "documents": {}
+        }
+
+    def _save_manifest(self):
+        """Save the document manifest to file."""
+        try:
+            self.manifest_file.parent.mkdir(parents=True, exist_ok=True)
+            self.manifest_file.write_text(json.dumps(self.file_manifest, indent=2, default=str))
+            logger.debug("Manifest saved successfully")
+        except Exception as e:
+            logger.error(f"Failed to save manifest: {e}")
+
+    def _add_to_manifest(self, document_id: str, document_info: DocumentInfo):
+        """Add a document to the manifest."""
+        self.file_manifest["documents"][document_id] = {
+            "document_id": document_id,
+            "filename": document_info.filename,
+            "compound": document_info.compound,
+            "study_id": document_info.study_id,
+            "deliverable": document_info.deliverable,
+            "file_path": str(document_info.file_path) if document_info.file_path else None,
+            "file_hash": document_info.file_hash,
+            "description": document_info.description,
+            "status": document_info.status,
+            "created_at": document_info.created_at.isoformat(),
+            "processed_at": document_info.processed_at.isoformat() if document_info.processed_at else None,
+            "total_pages": document_info.total_pages,
+            "total_chunks": document_info.total_chunks,
+            "tlf_outputs_found": document_info.tlf_outputs_found,
+            "tlf_types_distribution": document_info.tlf_types_distribution,
+            "clinical_domains_distribution": document_info.clinical_domains_distribution,
+            "has_vector_index": self.use_vector_store,
+        }
+        self._save_manifest()
+
+    def _remove_from_manifest(self, document_id: str):
+        """Remove a document from the manifest."""
+        if document_id in self.file_manifest["documents"]:
+            del self.file_manifest["documents"][document_id]
+            self._save_manifest()
+
+    def _restore_documents_from_manifest(self):
+        """Restore document info from manifest on startup."""
+        for doc_id, doc_data in self.file_manifest["documents"].items():
+            try:
+                # Convert back to DocumentInfo object
+                doc_info = DocumentInfo(
+                    document_id=doc_data["document_id"],
+                    filename=doc_data["filename"],
+                    compound=doc_data.get("compound"),
+                    study_id=doc_data.get("study_id"),
+                    deliverable=doc_data.get("deliverable"),
+                    file_path=doc_data.get("file_path"),
+                    file_hash=doc_data.get("file_hash"),
+                    description=doc_data.get("description"),
+                    status=ProcessingStatusEnum(doc_data["status"]),
+                    created_at=datetime.fromisoformat(doc_data["created_at"]),
+                    processed_at=datetime.fromisoformat(doc_data["processed_at"]) if doc_data.get("processed_at") else None,
+                    total_pages=doc_data.get("total_pages"),
+                    total_chunks=doc_data.get("total_chunks", 0),
+                    tlf_outputs_found=doc_data.get("tlf_outputs_found", 0),
+                    tlf_types_distribution=doc_data.get("tlf_types_distribution", {}),
+                    clinical_domains_distribution=doc_data.get("clinical_domains_distribution", {}),
+                )
+                
+                self._document_info[doc_id] = doc_info
+                
+                # Add to hash tracking if available
+                if doc_info.file_hash:
+                    self._document_hashes[doc_info.file_hash] = doc_id
+                
+                # Check if file still exists
+                if doc_info.file_path and not Path(doc_info.file_path).exists():
+                    logger.warning(f"File missing for document {doc_id}: {doc_info.file_path}")
+                    # Update status to indicate file is missing
+                    doc_info.status = ProcessingStatusEnum.FAILED
+                    doc_data["status"] = "failed"
+                    
+            except Exception as e:
+                logger.error(f"Failed to restore document {doc_id} from manifest: {e}")
+        
+        logger.info(f"Restored {len(self._document_info)} documents from manifest")
+
+    # **WORKAROUND: Methods to toggle vector store usage**
     
     def enable_vector_store(self):
         """Enable vector store processing for future documents."""
