@@ -133,10 +133,21 @@ app.add_middleware(
 )
 
 # Include routers
-app.include_router(health.router, prefix="/api/v1/health", tags=["health"])
-app.include_router(documents.router, prefix="/api/v1/documents", tags=["documents"])
-app.include_router(queries.router, prefix="/api/v1/queries", tags=["queries"])
-app.include_router(chat.router, prefix="/api/v1/chat", tags=["chat"]) 
+try:
+    app.include_router(health.router, prefix="/api/v1/health", tags=["health"])
+    app.include_router(documents.router, prefix="/api/v1/documents", tags=["documents"])  
+    app.include_router(queries.router, prefix="/api/v1/queries", tags=["queries"])
+    app.include_router(chat.router, prefix="/api/v1/chat", tags=["chat"])
+    
+    logger.info("✅ All API routes loaded successfully")
+    
+    # Debug routes (add this temporarily)
+    debug_routes(app)
+    
+except Exception as e:
+    logger.error(f"❌ Failed to include routes: {e}")
+    import traceback
+    traceback.print_exc()
 
 
 # Root endpoint
@@ -189,7 +200,6 @@ def get_chat_service() -> ChatService:
 
 
 # Additional convenience endpoints for chat integration
-
 @app.get("/api/v1/document/{document_id}/chat-ready")
 async def check_document_chat_ready(document_id: str):
     """Check if a document is ready for chat (processed and indexed)."""
