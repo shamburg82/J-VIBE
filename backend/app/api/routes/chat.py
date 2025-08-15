@@ -4,6 +4,7 @@ from fastapi.responses import StreamingResponse
 from typing import List, Optional, AsyncGenerator
 import logging
 from datetime import datetime
+import json
 
 from ...core.models import (
     ChatSession, ChatRequest, ChatResponse, NewChatRequest,
@@ -57,18 +58,76 @@ async def send_chat_message(
         logger.error(f"❌ Error sending chat message: {e}")
         raise HTTPException(status_code=500, detail=f"Failed to process message: {str(e)}")
 
+@router.api_route("/message-stream", methods=["GET"])
+async def send_chat_message_stream_get(
+    session_id: str,
+    message: str,
+    top_k: int = 15,
+    min_confidence: float = 0.4,
+    include_context: bool = True,
+    chat_service=Depends(get_chat_service)
+):
+    """Send a message with streaming response using GET (for EventSource compatibility)."""
+    
+    async def generate_chat_stream():
+        """Generate streaming chat response in SSE format."""
+        try:
+            # Create ChatRequest from query parameters
+            chat_request = ChatRequest(
+                session_id=session_id,
+                message=message,
+                top_k=top_k,
+                min_confidence=min_confidence,
+                include_context=include_context
+            )
+            
+            logger.info(f"🔄 Starting streaming chat for session {session_id}")
+            
+            # Stream the response
+            async for chunk in chat_service.send_message_stream(chat_request):
+                # Format as Server-Sent Events
+                chunk_data = chunk.model_dump_json()
+                yield f"data: {chunk_data}\n\n"
+                
+        except Exception as e:
+            logger.error(f"❌ Streaming chat error: {e}")
+            error_chunk = StreamingChatChunk(
+                session_id=session_id,
+                message_id="error",
+                type="error",
+                data={"error": str(e)},
+                timestamp=datetime.now()
+            )
+            yield f"data: {error_chunk.model_dump_json()}\n\n"
+    
+    return StreamingResponse(
+        generate_chat_stream(),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache",
+            "Connection": "keep-alive",
+            "X-Accel-Buffering": "no",
+        }
+    )
+
+# **ALTERNATIVE: POST version for streaming (more RESTful)**
 @router.post("/message-stream")
-async def send_chat_message_stream(
+async def send_chat_message_stream_post(
     request: ChatRequest,
     chat_service=Depends(get_chat_service)
 ):
-    """Send a message with streaming response."""
+    """Send a message with streaming response using POST."""
     
     async def generate_chat_stream() -> AsyncGenerator[str, None]:
         """Generate streaming chat response."""
         try:
+            logger.info(f"🔄 Starting streaming chat for session {request.session_id}")
+            
+            # Stream the response
             async for chunk in chat_service.send_message_stream(request):
-                yield f"data: {chunk.model_dump_json()}\n\n"
+                # Format as Server-Sent Events
+                chunk_data = chunk.model_dump_json()
+                yield f"data: {chunk_data}\n\n"
                 
         except Exception as e:
             logger.error(f"❌ Streaming chat error: {e}")
@@ -83,10 +142,11 @@ async def send_chat_message_stream(
     
     return StreamingResponse(
         generate_chat_stream(),
-        media_type="text/plain",
+        media_type="text/event-stream",
         headers={
             "Cache-Control": "no-cache",
             "Connection": "keep-alive",
+            "X-Accel-Buffering": "no",  # Disable proxy buffering
         }
     )
 
