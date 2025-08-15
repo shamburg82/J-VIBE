@@ -411,6 +411,51 @@ class DocumentService:
         
         logger.info(f"Successfully processed document {document_id} with vector store")
 
+    # Handle when vector processing is disabled
+    async def _process_without_vector_store(self, document_id: str, stored_file_path: Path, doc_info: DocumentInfo):
+        """Minimal processing without vector store (files only mode)."""
+        
+        await self._update_status(
+            document_id, ProcessingStatusEnum.EXTRACTING_TEXT, 50,
+            "Processing PDF metadata (vector store disabled)..."
+        )
+        
+        try:
+            # Extract basic document info (pages) without full processing
+            from llama_index.core import SimpleDirectoryReader
+            
+            documents = SimpleDirectoryReader(input_files=[str(stored_file_path)]).load_data()
+            total_pages = len(documents) if documents else 0
+            
+            # Update document info with basic stats
+            doc_info.total_pages = total_pages
+            doc_info.status = ProcessingStatusEnum.COMPLETED
+            doc_info.processed_at = datetime.now()
+            doc_info.total_chunks = 0  # No chunks since no vector processing
+            doc_info.tlf_outputs_found = 0  # No TLF extraction
+            
+            await self._update_status(
+                document_id, ProcessingStatusEnum.COMPLETED, 100,
+                f"File stored successfully ({total_pages} pages). Vector processing disabled.",
+                total_pages=total_pages,
+                total_chunks=0,
+                tlf_outputs_found=0
+            )
+            
+            # Update manifest
+            self._add_to_manifest(document_id, doc_info)
+            
+            logger.info(f"Successfully stored document {document_id} without vector processing")
+            
+        except Exception as e:
+            logger.error(f"Error in minimal processing for {document_id}: {e}")
+            doc_info.status = ProcessingStatusEnum.FAILED
+            await self._update_status(
+                document_id, ProcessingStatusEnum.FAILED, 0,
+                f"Failed to process document: {str(e)}",
+                error_message=str(e)
+            )
+
     async def _manual_document_processing(self, documents) -> List:
         """Manual fallback processing when pipeline fails."""
         logger.info("Starting manual document processing fallback")
