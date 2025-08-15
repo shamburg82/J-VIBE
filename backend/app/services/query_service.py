@@ -1,8 +1,9 @@
-# backend/app/services/query_service.py
+# backend/app/services/query_service.py - Enhanced version with better source extraction
 from typing import List, Dict, Optional, Any, AsyncGenerator
 import asyncio
 import time
 import logging
+import re
 from datetime import datetime
 
 from llama_index.core import VectorStoreIndex
@@ -18,7 +19,7 @@ logger = logging.getLogger(__name__)
 
 
 class QueryService:
-    """Service for handling document queries."""
+    """Service for handling document queries with source extraction."""
     
     def __init__(self, llm, storage_service: StorageService):
         self.llm = llm
@@ -28,7 +29,7 @@ class QueryService:
         self._query_history: Dict[str, List[QueryResponse]] = {}
         self._total_queries = 0
         
-        # Clinical prompt template
+        # clinical prompt template
         self.clinical_prompt_template = """You are a clinical data analyst reviewing clinical trial outputs (Tables, Listings, Figures - TLFs). 
 
 User Query: {query}
@@ -39,16 +40,17 @@ Clinical Trial Data:
 Instructions:
 - Answer the user's query based on the provided clinical trial data
 - If comparing data across groups, doses, or timepoints, clearly highlight differences
-- Reference specific table/output numbers when citing data
+- Reference specific table/output numbers when citing data (e.g., "According to Table 14.3.1...")
 - If data is incomplete or unclear, state what's missing
 - Use appropriate clinical terminology
 - If no relevant data is found, clearly state this
-- Summarize all sources you referenced in determining your response (by output type and number, not by chunk)
+- When referencing specific outputs, mention both the type (Table/Listing/Figure) and number
+- For page references, use format: "Page X" or "See page X for details"
 
 Analysis:"""
 
     async def process_query(self, request: QueryRequest) -> QueryResponse:
-        """Process a standard query request."""
+        """Process a standard query request with enhanced source extraction."""
         
         start_time = time.time()
         
@@ -65,12 +67,13 @@ Analysis:"""
             
             if not relevant_chunks:
                 response_text = f"No relevant clinical trial data found for query: '{request.query}'. Try using broader search terms or lowering the confidence threshold."
+                sources = []
             else:
                 # Generate response
                 context = self._prepare_context(relevant_chunks)
                 response_text = await self._query_llm(request.query, context)
                 
-                # Extract sources
+                # Extract sources with page information
                 sources = self._extract_sources(relevant_chunks)
             
             # Create response
@@ -96,7 +99,7 @@ Analysis:"""
             raise
 
     async def process_query_stream(self, request: QueryRequest) -> AsyncGenerator[StreamingQueryChunk, None]:
-        """Process query with streaming response."""
+        """Process query with streaming response and enhanced sources."""
         
         try:
             # Get relevant chunks first
@@ -125,15 +128,13 @@ Analysis:"""
             prompt = self.clinical_prompt_template.format(query=request.query, context=context)
             
             # Stream LLM response
-            # FIXED: Proper async streaming handling
             try:
-                # Check if the LLM supports streaming
                 if hasattr(self.llm, 'astream_complete'):
                     logger.info("Using LLM async streaming")
                     
                     # Get the streaming response
                     stream_response = self.llm.astream_complete(prompt)
-                    
+                     
                     # Check if it's a coroutine that needs to be awaited first
                     if hasattr(stream_response, '__await__'):
                         # This is a coroutine, await it first
@@ -182,7 +183,7 @@ Analysis:"""
                     
                     # Simulate streaming by breaking response into chunks
                     words = response.split()
-                    chunk_size = 10  # Send 10 words at a time
+                    chunk_size = 10
                     
                     for i in range(0, len(words), chunk_size):
                         chunk_words = words[i:i + chunk_size]
@@ -198,7 +199,7 @@ Analysis:"""
                         
             except Exception as stream_error:
                 logger.error(f"Streaming error: {stream_error}")
-                # Fallback to non-streaming
+                # Small delay to simulate streaming
                 response = await self._query_llm(request.query, context)
                 yield StreamingQueryChunk(
                     type="content",
@@ -230,26 +231,6 @@ Analysis:"""
                 type="error",
                 data={"error": str(e)}
             )
-
-    async def process_enhanced_query(self, request: EnhancedQueryRequest) -> QueryResponse:
-        """Process enhanced query with filters."""
-        
-        # Convert to metadata filters
-        metadata_filters = self._build_metadata_filters(request.filters)
-        
-        # Get vector index
-        vector_index = await self.storage_service.get_index(request.document_id)
-        if not vector_index:
-            raise Exception(f"Document {request.document_id} not found")
-        
-        # Retrieve with filters
-        relevant_chunks = await self._retrieve_relevant_chunks(
-            vector_index, request.query, request.top_k, 
-            request.min_confidence, metadata_filters
-        )
-        
-        # Process same as standard query
-        return await self.process_query(request)
 
     async def _retrieve_relevant_chunks(
         self,
@@ -292,84 +273,8 @@ Analysis:"""
         
         return filtered_results[:top_k]
 
-    def _build_metadata_filters(self, filters: Optional[QueryFilters]) -> Optional[MetadataFilters]:
-        """Build metadata filters from query filters."""
-        
-        if not filters:
-            return None
-        
-        filter_list = []
-        
-        # TLF type filters
-        if filters.tlf_types:
-            filter_list.append(
-                MetadataFilter(
-                    key="tlf_type",
-                    value=filters.tlf_types,
-                    operator="in"
-                )
-            )
-        
-        # Clinical domain filters
-        if filters.clinical_domains:
-            filter_list.append(
-                MetadataFilter(
-                    key="clinical_domain",
-                    value=filters.clinical_domains,
-                    operator="in"
-                )
-            )
-        
-        # Output number filters
-        if filters.output_numbers:
-            filter_list.append(
-                MetadataFilter(
-                    key="output_number",
-                    value=filters.output_numbers,
-                    operator="in"
-                )
-            )
-        
-        # Population filters
-        if filters.populations:
-            filter_list.append(
-                MetadataFilter(
-                    key="population",
-                    value=filters.populations,
-                    operator="in"
-                )
-            )
-        
-        # ADDED: Study ID filters (for future multi-document queries)
-        if hasattr(filters, 'study_ids') and filters.study_ids:
-            filter_list.append(
-                MetadataFilter(
-                    key="study_id",
-                    value=filters.study_ids,
-                    operator="in"
-                )
-            )
-        
-        # ADDED: Compound filters (for future multi-document queries)
-        if hasattr(filters, 'compounds') and filters.compounds:
-            filter_list.append(
-                MetadataFilter(
-                    key="compound",
-                    value=filters.compounds,
-                    operator="in"
-                )
-            )
-        
-        if filter_list:
-            return MetadataFilters(
-                filters=filter_list,
-                condition=FilterCondition.AND
-            )
-        
-        return None
-
     def _prepare_context(self, results: List[Any]) -> str:
-        """Prepare context string from search results."""
+        """Prepare context string with better formatting for clinical data."""
         
         context_parts = []
         
@@ -377,7 +282,7 @@ Analysis:"""
             metadata = result.node.metadata
             text = result.node.text
             
-            # Format context entry
+            # Enhanced metadata extraction
             title = metadata.get("title") or "Unknown"
             output_number = metadata.get("output_number") or ""
             tlf_type = metadata.get("tlf_type") or ""
@@ -385,11 +290,29 @@ Analysis:"""
             population = metadata.get("population") or ""
             overall_conf = metadata.get("overall_confidence") or 0
             
+            # Extract page information more robustly
+            page_number = None
+            page_info = metadata.get("page_info", {})
+            if isinstance(page_info, dict):
+                page_number = page_info.get("current_page") or page_info.get("page_number")
+            
+            # Fallback page extraction
+            if not page_number:
+                page_number = metadata.get("page_number") or metadata.get("page_label")
+            
+            # Try to extract page from other metadata
+            if not page_number:
+                source_info = metadata.get("source", "")
+                page_match = re.search(r'page[_\s]?(\d+)', source_info.lower())
+                if page_match:
+                    page_number = int(page_match.group(1))
+
             entry = f"""
 --- OUTPUT {i+1} ---
 Type: {tlf_type.title() if tlf_type else 'Unknown'}
 Number: {output_number}
 Title: {title}
+Page: {page_number if page_number else 'Unknown'}
 Clinical Domain: {clinical_domain}
 Population: {population}
 Confidence: {overall_conf:.2f}
@@ -403,20 +326,8 @@ Content:
         
         return '\n'.join(context_parts)
 
-    async def _query_llm(self, query: str, context: str) -> str:
-        """Query LLM with context."""
-        
-        prompt = self.clinical_prompt_template.format(query=query, context=context)
-        
-        if hasattr(self.llm, 'acomplete'):
-            response = await self.llm.acomplete(prompt)
-        else:
-            response = self.llm.complete(prompt)
-        
-        return str(response).strip()
-
     def _extract_sources(self, results: List[Any]) -> List[QuerySource]:
-        """Extract source information from search results."""
+        """Extract enhanced source information with better page detection."""
         
         source_summary = {}
         
@@ -425,8 +336,10 @@ Content:
             tlf_type = metadata.get("tlf_type") or "Unknown"
             output_number = metadata.get("output_number") or "Unknown"
             title = metadata.get("title") or "No title"
-            page_number = metadata.get("page_info", {}).get("current_page")
             overall_conf = metadata.get("overall_confidence", 0)
+            
+            # Enhanced page number extraction
+            page_number = self._extract_page_number(metadata)
             
             source_id = f"{tlf_type} {output_number}"
             
@@ -445,8 +358,78 @@ Content:
                 source_summary[source_id].confidence,
                 overall_conf
             )
+            
+            # Update page number if we find a better one
+            if page_number and not source_summary[source_id].page_number:
+                source_summary[source_id].page_number = page_number
         
         return list(source_summary.values())
+
+    def _extract_page_number(self, metadata: Dict[str, Any]) -> Optional[int]:
+        """Extract page number from metadata with multiple fallback strategies."""
+        
+        # Strategy 1: Direct page_info
+        page_info = metadata.get("page_info", {})
+        if isinstance(page_info, dict):
+            page_num = page_info.get("current_page") or page_info.get("page_number")
+            if page_num:
+                try:
+                    return int(page_num)
+                except (ValueError, TypeError):
+                    pass
+        
+        # Strategy 2: Direct page_number or page_label
+        for key in ["page_number", "page_label", "page"]:
+            page_val = metadata.get(key)
+            if page_val:
+                try:
+                    return int(page_val)
+                except (ValueError, TypeError):
+                    pass
+        
+        # Strategy 3: Extract from source path/filename
+        source_info = metadata.get("source", "")
+        if source_info:
+            # Look for patterns like "page_5", "page-5", "p5", etc.
+            patterns = [
+                r'page[_\s-]?(\d+)',
+                r'p[_\s-]?(\d+)',
+                r'pg[_\s-]?(\d+)'
+            ]
+            
+            for pattern in patterns:
+                match = re.search(pattern, source_info.lower())
+                if match:
+                    try:
+                        return int(match.group(1))
+                    except (ValueError, TypeError):
+                        continue
+        
+        # Strategy 4: Extract from document_id or node_id patterns
+        for id_key in ["id_", "node_id", "document_id"]:
+            id_val = metadata.get(id_key, "")
+            if id_val:
+                # Look for patterns like "doc1_page5" or similar
+                match = re.search(r'(?:page|p|pg)[_\s-]?(\d+)', str(id_val).lower())
+                if match:
+                    try:
+                        return int(match.group(1))
+                    except (ValueError, TypeError):
+                        continue
+        
+        return None
+
+    async def _query_llm(self, query: str, context: str) -> str:
+        """Query LLM with context."""
+        
+        prompt = self.clinical_prompt_template.format(query=query, context=context)
+        
+        if hasattr(self.llm, 'acomplete'):
+            response = await self.llm.acomplete(prompt)
+        else:
+            response = self.llm.complete(prompt)
+        
+        return str(response).strip()
 
     def _add_to_history(self, document_id: str, response: QueryResponse):
         """Add query to history."""
@@ -485,7 +468,6 @@ Content:
                 return None
             
             # Get all nodes from the vector store
-            # This approach works with most vector stores
             nodes = []
             try:
                 # Try to get nodes directly from the index
@@ -530,12 +512,13 @@ Content:
                 logger.warning(f"No nodes found for document {document_id}")
                 return None
             
-            # Extract unique values from node metadata
+            # Extract unique values from node metadata with enhanced page detection
             tlf_types = set()
             clinical_domains = set()
             output_numbers = set()
             populations = set()
             treatment_groups = set()
+            pages_found = set()
             
             for node in nodes:
                 if not hasattr(node, 'metadata'):
@@ -569,8 +552,13 @@ Content:
                     treatment_groups.update(groups)
                 elif isinstance(groups, str):
                     treatment_groups.add(groups)
+                
+                # Collect page numbers
+                page_num = self._extract_page_number(metadata)
+                if page_num:
+                    pages_found.add(page_num)
             
-            # Build summary with counts
+            # Build enhanced summary with page information
             sources_summary = {
                 "tlf_types": {
                     "available": sorted(list(tlf_types)),
@@ -592,18 +580,27 @@ Content:
                     "available": sorted(list(treatment_groups)),
                     "count": len(treatment_groups)
                 },
+                "pages": {
+                    "available": sorted(list(pages_found)),
+                    "count": len(pages_found),
+                    "range": f"{min(pages_found)}-{max(pages_found)}" if pages_found else "Unknown"
+                },
                 "total_nodes_analyzed": len(nodes),
                 "document_id": document_id
             }
             
-            # Add some statistics
+            # Add statistics
             tlf_output_nodes = len([n for n in nodes if n.metadata.get('tlf_type')])
+            nodes_with_pages = len([n for n in nodes if self._extract_page_number(n.metadata)])
+            
             sources_summary["statistics"] = {
                 "nodes_with_tlf_metadata": tlf_output_nodes,
-                "percentage_tlf_content": round((tlf_output_nodes / len(nodes)) * 100, 1) if nodes else 0
+                "nodes_with_page_info": nodes_with_pages,
+                "percentage_tlf_content": round((tlf_output_nodes / len(nodes)) * 100, 1) if nodes else 0,
+                "percentage_with_pages": round((nodes_with_pages / len(nodes)) * 100, 1) if nodes else 0
             }
             
-            logger.info(f"Extracted sources for document {document_id}: {len(tlf_types)} TLF types, {len(output_numbers)} outputs")
+            logger.info(f"Enhanced sources extracted for document {document_id}: {len(tlf_types)} TLF types, {len(output_numbers)} outputs, {len(pages_found)} pages")
             
             return sources_summary
             
