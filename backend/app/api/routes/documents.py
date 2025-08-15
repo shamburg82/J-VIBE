@@ -1,6 +1,6 @@
 # backend/app/api/routes/documents.py (Complete working version)
 from fastapi import APIRouter, HTTPException, Depends, UploadFile, File, BackgroundTasks, Form, Request
-from fastapi.responses import StreamingResponse, FileResponse
+from fastapi.responses import Response, StreamingResponse, FileResponse
 from typing import List, Optional, AsyncGenerator
 from pathlib import Path
 import os
@@ -524,13 +524,13 @@ async def delete_document(
     
     return {"message": "Document deleted successfully"}
 
-# Serve PDF files
-@router.get("/serve/{document_id}")
+@router.api_route("/serve/{document_id}", methods=["GET", "HEAD"])
 async def serve_pdf_file(
+    request: Request,
     document_id: str,
     document_service=Depends(get_document_service)
 ):
-    """Serve the actual PDF file for viewing."""
+    """Serve the actual PDF file for viewing - supports both GET and HEAD."""
     
     try:
         # Get document info
@@ -538,7 +538,14 @@ async def serve_pdf_file(
         if not doc_info:
             raise HTTPException(status_code=404, detail="Document not found")
         
-        # Check if file exists
+        # Check if document is completed
+        if doc_info.status != "completed":
+            raise HTTPException(
+                status_code=400, 
+                detail=f"Document not ready for viewing (status: {doc_info.status})"
+            )
+        
+        # Check if file exists and file_path is available
         if not hasattr(doc_info, 'file_path') or not doc_info.file_path:
             raise HTTPException(status_code=404, detail="File path not available")
         
@@ -546,14 +553,34 @@ async def serve_pdf_file(
         if not file_path.exists():
             raise HTTPException(status_code=404, detail="File not found on disk")
         
-        # Serve the file
+        # Check if it's actually a PDF file
+        if not file_path.suffix.lower() == '.pdf':
+            raise HTTPException(status_code=400, detail="File is not a PDF")
+        
+        logger.info(f"Serving PDF ({request.method}): {file_path} for document {document_id}")
+        
+        # For HEAD requests, return headers only
+        if request.method == "HEAD":
+            file_size = file_path.stat().st_size
+            return Response(
+                headers={
+                    "Content-Type": "application/pdf",
+                    "Content-Length": str(file_size),
+                    "Content-Disposition": f"inline; filename={doc_info.filename}",
+                    "Accept-Ranges": "bytes",
+                    "Cache-Control": "public, max-age=3600",
+                }
+            )
+        
+        # For GET requests, return the file
         return FileResponse(
             path=str(file_path),
             media_type="application/pdf",
             filename=doc_info.filename,
             headers={
                 "Content-Disposition": f"inline; filename={doc_info.filename}",
-                "Cache-Control": "public, max-age=3600"  # Cache for 1 hour
+                "Cache-Control": "public, max-age=3600",
+                "Accept-Ranges": "bytes",
             }
         )
         
@@ -562,6 +589,7 @@ async def serve_pdf_file(
     except Exception as e:
         logger.error(f"Error serving PDF file for document {document_id}: {e}")
         raise HTTPException(status_code=500, detail=f"Failed to serve file: {str(e)}")
+
 
 @router.get("/chat-ready/{document_id}")
 async def check_document_chat_ready(
