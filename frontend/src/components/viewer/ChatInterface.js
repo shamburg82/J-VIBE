@@ -17,6 +17,9 @@ import {
   Menu,
   MenuItem,
   Tooltip,
+  Card,
+  CardContent,
+  Collapse,
 } from '@mui/material';
 import {
   Send,
@@ -27,12 +30,18 @@ import {
   Refresh,
   ContentCopy,
   Share,
+  ExpandMore,
+  ExpandLess,
+  Launch,
+  FindInPage,
+  Bookmark,
 } from '@mui/icons-material';
 import { apiService, streamingUtils } from '../../services/apiService';
 
 const ChatInterface = ({ 
   documentId, 
   onSourceClick, 
+  onSearchInDocument,
   chatSession, 
   setChatSession 
 }) => {
@@ -43,6 +52,7 @@ const ChatInterface = ({
   const [error, setError] = useState(null);
   const [chatExamples, setChatExamples] = useState(null);
   const [menuAnchor, setMenuAnchor] = useState(null);
+  const [expandedSources, setExpandedSources] = useState(new Set());
   
   const messagesEndRef = useRef(null);
   const inputRef = useRef(null);
@@ -213,14 +223,68 @@ const ChatInterface = ({
   };
 
   const handleSourceClick = useCallback((source) => {
+    console.log('Chat source clicked:', source);
     if (onSourceClick && source.page_number) {
+      // Pass individual parameters as expected by the PDF viewer
       onSourceClick(source.page_number, source.title);
+    } else {
+      console.warn('No page number found in source:', source);
     }
   }, [onSourceClick]);
+
+  const handleSearchInPdf = useCallback((searchText) => {
+    if (onSearchInDocument && searchText) {
+      onSearchInDocument(searchText);
+    }
+  }, [onSearchInDocument]);
+
+  const toggleSourceExpansion = (messageId) => {
+    setExpandedSources(prev => {
+      const newSet = new Set(prev);
+      if (newSet.has(messageId)) {
+        newSet.delete(messageId);
+      } else {
+        newSet.add(messageId);
+      }
+      return newSet;
+    });
+  };
+
+  const formatSourceTitle = (source) => {
+    const type = source.output_type || 'Output';
+    const number = source.output_number || 'Unknown';
+    return `${type} ${number}`;
+  };
+
+  const extractSearchableTerms = (content) => {
+    // Extract potential search terms from the response
+    const terms = [];
+    
+    // Look for table/figure references like "Table 14.3.1", "Figure 1", etc.
+    const tableRefs = content.match(/(?:Table|Figure|Listing)\s+[\d.]+/gi);
+    if (tableRefs) {
+      terms.push(...tableRefs);
+    }
+    
+    // Look for quoted terms that might be searchable
+    const quotedTerms = content.match(/"([^"]+)"/g);
+    if (quotedTerms) {
+      terms.push(...quotedTerms.map(term => term.replace(/"/g, '')));
+    }
+    
+    // Look for medical/clinical terms (simple heuristic)
+    const clinicalTerms = content.match(/\b(?:adverse events?|endpoint|efficacy|safety|demographics|baseline|treatment|placebo|dose|mg|patients?|subjects?)\b/gi);
+    if (clinicalTerms) {
+      terms.push(...new Set(clinicalTerms)); // Remove duplicates
+    }
+    
+    return terms.slice(0, 5); // Limit to 5 terms
+  };
 
   const renderMessage = (message, index) => {
     const isUser = message.role === 'user';
     const isAssistant = message.role === 'assistant';
+    const isSourcesExpanded = expandedSources.has(message.id);
 
     return (
       <ListItem
@@ -239,6 +303,7 @@ const ChatInterface = ({
             alignItems: 'flex-start',
             gap: 1,
             maxWidth: '85%',
+            width: '100%',
           }}
         >
           <Avatar
@@ -251,68 +316,206 @@ const ChatInterface = ({
             {isUser ? <Person fontSize="small" /> : <SmartToy fontSize="small" />}
           </Avatar>
 
-          <Paper
-            elevation={1}
-            sx={{
-              p: 2,
-              bgcolor: isUser ? 'primary.light' : 'background.paper',
-              color: isUser ? 'primary.contrastText' : 'text.primary',
-              borderRadius: 2,
-              maxWidth: '100%',
-            }}
-          >
-            <Typography variant="body1" sx={{ whiteSpace: 'pre-wrap' }}>
-              {message.content}
-            </Typography>
+          <Box sx={{ flexGrow: 1, minWidth: 0 }}>
+            <Paper
+              elevation={1}
+              sx={{
+                p: 2,
+                bgcolor: isUser ? 'primary.light' : 'background.paper',
+                color: isUser ? 'primary.contrastText' : 'text.primary',
+                borderRadius: 2,
+                mb: 1,
+              }}
+            >
+              <Typography variant="body1" sx={{ whiteSpace: 'pre-wrap' }}>
+                {message.content}
+              </Typography>
 
-            {/* Sources for assistant messages */}
-            {isAssistant && message.sources && message.sources.length > 0 && (
-              <Box sx={{ mt: 2 }}>
-                <Typography variant="caption" color="text.secondary" gutterBottom>
-                  Sources:
+              {/* Message actions */}
+              <Box sx={{ 
+                display: 'flex', 
+                justifyContent: 'space-between', 
+                alignItems: 'center',
+                mt: 1,
+              }}>
+                <Typography variant="caption" color="text.secondary">
+                  {new Date(message.timestamp).toLocaleTimeString()}
                 </Typography>
-                <Box sx={{ display: 'flex', flexWrap: 'wrap', gap: 0.5 }}>
-                  {message.sources.map((source, idx) => (
-                    <Chip
-                      key={idx}
-                      label={`${source.output_type || 'Output'} ${source.output_number || idx + 1}`}
-                      size="small"
-                      variant="outlined"
-                      clickable
-                      onClick={() => handleSourceClick(source)}
-                      sx={{
-                        fontSize: '0.7rem',
-                        height: 24,
-                        '&:hover': {
-                          bgcolor: 'action.hover',
-                        },
-                      }}
-                    />
-                  ))}
+                
+                <Box sx={{ display: 'flex', gap: 0.5 }}>
+                  <IconButton
+                    size="small"
+                    onClick={() => handleCopyMessage(message.content)}
+                  >
+                    <ContentCopy fontSize="small" />
+                  </IconButton>
+                  
+                  {/* Search in PDF button for assistant messages */}
+                  {isAssistant && onSearchInDocument && (
+                    <Tooltip title="Search key terms in PDF">
+                      <IconButton
+                        size="small"
+                        onClick={() => {
+                          const terms = extractSearchableTerms(message.content);
+                          if (terms.length > 0) {
+                            handleSearchInPdf(terms[0]); // Search first term
+                          }
+                        }}
+                      >
+                        <FindInPage fontSize="small" />
+                      </IconButton>
+                    </Tooltip>
+                  )}
                 </Box>
               </Box>
-            )}
+            </Paper>
 
-            {/* Message actions */}
-            <Box sx={{ 
-              display: 'flex', 
-              justifyContent: 'space-between', 
-              alignItems: 'center',
-              mt: 1,
-            }}>
-              <Typography variant="caption" color="text.secondary">
-                {new Date(message.timestamp).toLocaleTimeString()}
-              </Typography>
-              
-              <IconButton
-                size="small"
-                onClick={() => handleCopyMessage(message.content)}
-                sx={{ ml: 1 }}
-              >
-                <ContentCopy fontSize="small" />
-              </IconButton>
-            </Box>
-          </Paper>
+            {/* Enhanced Sources Section */}
+            {isAssistant && message.sources && message.sources.length > 0 && (
+              <Card variant="outlined" sx={{ mt: 1 }}>
+                <CardContent sx={{ p: 1.5, '&:last-child': { pb: 1.5 } }}>
+                  <Box sx={{ display: 'flex', alignItems: 'center', mb: 1 }}>
+                    <Typography variant="subtitle2" color="text.secondary" sx={{ flexGrow: 1 }}>
+                      Sources ({message.sources.length})
+                    </Typography>
+                    <IconButton
+                      size="small"
+                      onClick={() => toggleSourceExpansion(message.id)}
+                    >
+                      {isSourcesExpanded ? <ExpandLess /> : <ExpandMore />}
+                    </IconButton>
+                  </Box>
+
+                  {/* Compact source chips */}
+                  <Box sx={{ display: 'flex', flexWrap: 'wrap', gap: 0.5, mb: 1 }}>
+                    {message.sources.slice(0, isSourcesExpanded ? undefined : 3).map((source, idx) => (
+                      <Chip
+                        key={idx}
+                        label={formatSourceTitle(source)}
+                        size="small"
+                        variant="outlined"
+                        clickable
+                        onClick={() => handleSourceClick(source)}
+                        icon={<Launch />}
+                        sx={{
+                          fontSize: '0.7rem',
+                          height: 24,
+                          '&:hover': {
+                            bgcolor: 'primary.light',
+                            color: 'primary.contrastText',
+                          },
+                          cursor: 'pointer',
+                        }}
+                      />
+                    ))}
+                    {!isSourcesExpanded && message.sources.length > 3 && (
+                      <Chip
+                        label={`+${message.sources.length - 3} more`}
+                        size="small"
+                        variant="outlined"
+                        onClick={() => toggleSourceExpansion(message.id)}
+                        sx={{ fontSize: '0.7rem', height: 24 }}
+                      />
+                    )}
+                  </Box>
+
+                  {/* Expanded source details */}
+                  <Collapse in={isSourcesExpanded}>
+                    <Divider sx={{ mb: 1 }} />
+                    {message.sources.map((source, idx) => (
+                      <Box
+                        key={idx}
+                        sx={{
+                          p: 1,
+                          mb: 1,
+                          bgcolor: 'grey.50',
+                          borderRadius: 1,
+                          border: 1,
+                          borderColor: 'grey.200',
+                          '&:hover': {
+                            bgcolor: 'grey.100',
+                            cursor: 'pointer',
+                          },
+                        }}
+                        onClick={() => {
+                          console.log('Source box clicked:', source);
+                          handleSourceClick(source);
+                        }}
+                      >
+                        <Box sx={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
+                          <Box>
+                            <Typography variant="body2" fontWeight="medium">
+                              {formatSourceTitle(source)}
+                            </Typography>
+                            {source.title && (
+                              <Typography variant="caption" color="text.secondary" sx={{ display: 'block' }}>
+                                {source.title}
+                              </Typography>
+                            )}
+                          </Box>
+                          <Box sx={{ display: 'flex', alignItems: 'center', gap: 0.5 }}>
+                            {source.page_number && (
+                              <Chip
+                                label={`Page ${source.page_number}`}
+                                size="small"
+                                color="primary"
+                                variant="filled"
+                                sx={{ fontSize: '0.6rem', height: 20 }}
+                              />
+                            )}
+                            {source.confidence && (
+                              <Chip
+                                label={`${Math.round(source.confidence * 100)}%`}
+                                size="small"
+                                color={source.confidence > 0.8 ? 'success' : source.confidence > 0.6 ? 'warning' : 'default'}
+                                variant="outlined"
+                                sx={{ fontSize: '0.6rem', height: 20 }}
+                              />
+                            )}
+                            <Launch fontSize="small" color="action" />
+                          </Box>
+                        </Box>
+                        
+                        {source.chunk_count && source.chunk_count > 1 && (
+                          <Typography variant="caption" color="text.secondary">
+                            {source.chunk_count} chunks referenced
+                          </Typography>
+                        )}
+                      </Box>
+                    ))}
+                  </Collapse>
+
+                  {/* Quick search suggestions from this response */}
+                  {isSourcesExpanded && (
+                    <Box sx={{ mt: 1 }}>
+                      <Typography variant="caption" color="text.secondary" gutterBottom>
+                        Quick search in PDF:
+                      </Typography>
+                      <Box sx={{ display: 'flex', flexWrap: 'wrap', gap: 0.5, mt: 0.5 }}>
+                        {extractSearchableTerms(message.content).slice(0, 3).map((term, idx) => (
+                          <Button
+                            key={idx}
+                            size="small"
+                            variant="outlined"
+                            startIcon={<FindInPage />}
+                            onClick={() => handleSearchInPdf(term)}
+                            sx={{ 
+                              fontSize: '0.65rem', 
+                              height: 22,
+                              minWidth: 'auto',
+                              px: 1,
+                            }}
+                          >
+                            {term.length > 15 ? `${term.substring(0, 15)}...` : term}
+                          </Button>
+                        ))}
+                      </Box>
+                    </Box>
+                  )}
+                </CardContent>
+              </Card>
+            )}
+          </Box>
         </Box>
       </ListItem>
     );
@@ -403,6 +606,9 @@ const ChatInterface = ({
             </Typography>
             <Typography variant="body2" color="text.secondary" gutterBottom>
               Ask questions about the clinical trial data, tables, and results
+            </Typography>
+            <Typography variant="caption" color="text.secondary" gutterBottom>
+              💡 Click on sources to navigate to specific pages in the PDF
             </Typography>
 
             {chatExamples && (
@@ -503,7 +709,7 @@ const ChatInterface = ({
 
         {/* Tips */}
         <Typography variant="caption" color="text.secondary" sx={{ display: 'block', mt: 1 }}>
-          Press Enter to send, Shift+Enter for new line
+          Press Enter to send, Shift+Enter for new line • Click sources to navigate PDF
         </Typography>
       </Box>
     </Box>
