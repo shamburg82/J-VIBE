@@ -1,4 +1,3 @@
-// Fixed DocumentViewer.js - Removes HEAD request check and assumes viewer is ready
 import React, { useState, useEffect, useRef, useCallback } from 'react';
 import { useParams } from 'react-router-dom';
 import {
@@ -8,7 +7,6 @@ import {
   Typography,
   Alert,
   CircularProgress,
-  Drawer,
   IconButton,
   Fab,
   Snackbar,
@@ -31,6 +29,7 @@ import {
   Search,
   Clear,
   CheckCircle,
+  DragIndicator,
 } from '@mui/icons-material';
 
 import ChatInterface from './ChatInterface';
@@ -56,9 +55,15 @@ const DocumentViewer = () => {
   const [snackbar, setSnackbar] = useState({ open: false, message: '', severity: 'info' });
   const [searchText, setSearchText] = useState('');
   
+  // Resizable chat state
+  const [chatWidth, setChatWidth] = useState(400);
+  const [chatHeight, setChatHeight] = useState(40);
+  const [isResizing, setIsResizing] = useState(false);
+  
   // Refs
   const containerRef = useRef(null);
   const pdfIframeRef = useRef(null);
+  const chatRef = useRef(null);
 
   useEffect(() => {
     const fetchDocument = async () => {
@@ -74,8 +79,6 @@ const DocumentViewer = () => {
         if (docInfo.status === 'completed') {
           const basePath = window.__POSIT_BASE_PATH__ || '';
           const pdfUrl = `${basePath}/api/v1/documents/serve/${documentId}`;
-          
-          // Skip the HEAD request check - just set the PDF URL directly
           setDocumentFile(pdfUrl);
         }
         
@@ -92,18 +95,23 @@ const DocumentViewer = () => {
     }
   }, [documentId]);
 
-  // Get local PDF.js viewer URL - simplified without availability check
-  const getPdfViewerUrl = () => {
+  // Get PDF.js viewer URL with page parameter
+  const getPdfViewerUrl = (pageNumber = null) => {
     if (!documentFile) return '';
     
     const basePath = window.__POSIT_BASE_PATH__ || '';
     const viewerUrl = `${basePath}/static/pdfjs/web/viewer.html`;
     const fileParam = encodeURIComponent(documentFile);
     
-    return `${viewerUrl}?file=${fileParam}`;
+    let url = `${viewerUrl}?file=${fileParam}`;
+    if (pageNumber) {
+      url += `&page=${pageNumber}`;
+    }
+    
+    return url;
   };
 
-  // Navigate to page using PDF.js postMessage API instead of URL reload
+  // FIXED: Direct URL-based navigation (most reliable method)
   const navigateToPage = useCallback((pageNumber) => {
     if (!pdfIframeRef.current || !documentFile) {
       console.warn('PDF iframe not ready');
@@ -115,41 +123,23 @@ const DocumentViewer = () => {
       return;
     }
 
+    console.log('Navigating to page:', pageNumber);
+
     try {
-      console.log('Navigating to page using postMessage:', pageNumber);
+      // Direct URL approach - most reliable for PDF.js
+      const newUrl = getPdfViewerUrl(pageNumber);
+      console.log('Loading PDF with page:', newUrl);
       
-      // Try postMessage first (modern approach)
-      if (pdfIframeRef.current.contentWindow) {
-        pdfIframeRef.current.contentWindow.postMessage({
-          type: 'goToPage',
-          page: pageNumber
-        }, '*');
-        
-        setSnackbar({
-          open: true,
-          message: `Navigated to page ${pageNumber}`,
-          severity: 'success'
-        });
-        return;
-      }
-      
-      // Fallback: URL reload method
-      const basePath = window.__POSIT_BASE_PATH__ || '';
-      const viewerUrl = `${basePath}/static/pdfjs/web/viewer.html`;
-      const fileParam = encodeURIComponent(documentFile);
-      const fullUrl = `${viewerUrl}?file=${fileParam}&page=${pageNumber}`;
-      
-      console.log('Fallback: Reloading with URL:', fullUrl);
-      pdfIframeRef.current.src = fullUrl;
+      pdfIframeRef.current.src = newUrl;
       
       setSnackbar({
         open: true,
-        message: `Navigated to page ${pageNumber}`,
+        message: `Navigating to page ${pageNumber}`,
         severity: 'success'
       });
       
     } catch (error) {
-      console.error('Navigation error:', error);
+      console.error('Navigation failed:', error);
       setSnackbar({
         open: true,
         message: `Failed to navigate to page ${pageNumber}`,
@@ -158,38 +148,21 @@ const DocumentViewer = () => {
     }
   }, [documentFile]);
 
-  // Search in PDF using postMessage API
+  // Search in PDF
   const searchInPdf = useCallback((searchTerm) => {
     if (!pdfIframeRef.current || !documentFile || !searchTerm.trim()) {
       return;
     }
 
     try {
-      console.log('Searching using postMessage:', searchTerm);
+      console.log('Searching for:', searchTerm);
       
-      // Try postMessage first
-      if (pdfIframeRef.current.contentWindow) {
-        pdfIframeRef.current.contentWindow.postMessage({
-          type: 'search',
-          query: searchTerm.trim()
-        }, '*');
-        
-        setSnackbar({
-          open: true,
-          message: `Searching for "${searchTerm}"`,
-          severity: 'info'
-        });
-        return;
-      }
-      
-      // Fallback: URL reload method
       const basePath = window.__POSIT_BASE_PATH__ || '';
       const viewerUrl = `${basePath}/static/pdfjs/web/viewer.html`;
       const fileParam = encodeURIComponent(documentFile);
       const searchParam = encodeURIComponent(searchTerm.trim());
       const fullUrl = `${viewerUrl}?file=${fileParam}&search=${searchParam}`;
       
-      console.log('Fallback: Searching with URL reload:', fullUrl);
       pdfIframeRef.current.src = fullUrl;
       
       setSnackbar({
@@ -208,130 +181,72 @@ const DocumentViewer = () => {
     }
   }, [documentFile]);
 
-  // Enhanced source click handler with delay for iframe loading
-  const handleSourceClick = useCallback((pageNumber, searchText) => {
-    console.log('Source click received:', { pageNumber, searchText, type: typeof pageNumber });
+  // Source click handler
+  const handleSourceClick = useCallback((pageNumber) => {
+    console.log('Source click - navigating to page:', pageNumber);
     
     if (!pageNumber || typeof pageNumber !== 'number' || pageNumber <= 0) {
       console.warn('Invalid page number:', pageNumber);
       setSnackbar({
         open: true,
-        message: `Unable to navigate: invalid page number (${pageNumber})`,
+        message: `Invalid page number: ${pageNumber}`,
         severity: 'warning'
       });
       return;
     }
 
-    if (!pdfIframeRef.current || !documentFile) {
-      setSnackbar({
-        open: true,
-        message: 'PDF viewer not ready',
-        severity: 'warning'
-      });
-      return;
-    }
+    navigateToPage(pageNumber);
+  }, [navigateToPage]);
 
-    try {
-      console.log('Chat source navigation - trying postMessage first');
-      
-      // Method 1: Try postMessage API (preferred)
-      if (pdfIframeRef.current.contentWindow) {
-        // Navigate to page first
-        pdfIframeRef.current.contentWindow.postMessage({
-          type: 'goToPage',
-          page: pageNumber
-        }, '*');
-        
-        // If search text provided, search after a small delay
-        if (searchText && searchText.trim()) {
-          setTimeout(() => {
-            if (pdfIframeRef.current?.contentWindow) {
-              pdfIframeRef.current.contentWindow.postMessage({
-                type: 'search',
-                query: searchText.trim()
-              }, '*');
-            }
-          }, 500); // 500ms delay to allow page navigation to complete
-        }
-        
-        const message = searchText 
-          ? `Navigated to page ${pageNumber} and searching for "${searchText}"`
-          : `Navigated to page ${pageNumber}`;
-          
-        setSnackbar({
-          open: true,
-          message: message,
-          severity: 'success'
-        });
-        return;
-      }
-      
-      // Method 2: Fallback to URL parameters (reload method)
-      console.log('PostMessage failed, falling back to URL reload');
-      const basePath = window.__POSIT_BASE_PATH__ || '';
-      const viewerUrl = `${basePath}/static/pdfjs/web/viewer.html`;
-      const fileParam = encodeURIComponent(documentFile);
-      
-      let fullUrl = `${viewerUrl}?file=${fileParam}&page=${pageNumber}`;
-      
-      if (searchText && searchText.trim()) {
-        const searchParam = encodeURIComponent(searchText.trim());
-        fullUrl += `&search=${searchParam}`;
-      }
-      
-      console.log('Chat source navigation URL (fallback):', fullUrl);
-      pdfIframeRef.current.src = fullUrl;
-      
-      const message = searchText 
-        ? `Navigated to page ${pageNumber} and searching for "${searchText}"`
-        : `Navigated to page ${pageNumber}`;
-        
-      setSnackbar({
-        open: true,
-        message: message,
-        severity: 'success'
-      });
-      
-    } catch (error) {
-      console.error('Source click navigation error:', error);
-      setSnackbar({
-        open: true,
-        message: 'Navigation failed',
-        severity: 'error'
-      });
-    }
-  }, [documentFile]);
-
-  // Listen for messages from PDF.js iframe
-  useEffect(() => {
-    const handleMessage = (event) => {
-      // Only process messages from our PDF viewer
-      if (event.source !== pdfIframeRef.current?.contentWindow) {
-        return;
-      }
-      
-      console.log('Received message from PDF viewer:', event.data);
-      
-      // Handle different message types from PDF.js
-      switch (event.data?.type) {
-        case 'pageChanged':
-          console.log('PDF viewer page changed to:', event.data.page);
-          break;
-        case 'searchComplete':
-          console.log('PDF viewer search completed:', event.data);
-          break;
-        case 'ready':
-          console.log('PDF viewer is ready');
-          break;
-        default:
-          break;
+  // FIXED: Working resize handlers
+  const handleResizeStart = useCallback((e, direction) => {
+    e.preventDefault();
+    e.stopPropagation();
+    
+    console.log('Starting resize:', direction);
+    setIsResizing(true);
+    
+    const startX = e.clientX;
+    const startY = e.clientY;
+    const startWidth = chatWidth;
+    const startHeight = chatHeight;
+    
+    const handleMouseMove = (moveEvent) => {
+      if (direction === 'horizontal') {
+        // For right panel, decreasing X should increase width
+        const deltaX = startX - moveEvent.clientX;
+        const newWidth = Math.max(300, Math.min(800, startWidth + deltaX));
+        setChatWidth(newWidth);
+      } else {
+        // For bottom panel, decreasing Y should increase height
+        const containerHeight = containerRef.current?.clientHeight || window.innerHeight;
+        const deltaY = startY - moveEvent.clientY;
+        const newHeightPx = (startHeight / 100) * containerHeight + deltaY;
+        const newHeightPercent = Math.max(20, Math.min(70, (newHeightPx / containerHeight) * 100));
+        setChatHeight(newHeightPercent);
       }
     };
-
-    window.addEventListener('message', handleMessage);
     
+    const handleMouseUp = () => {
+      console.log('Ending resize');
+      setIsResizing(false);
+      document.removeEventListener('mousemove', handleMouseMove);
+      document.removeEventListener('mouseup', handleMouseUp);
+      document.body.style.cursor = '';
+      document.body.style.userSelect = '';
+    };
+    
+    document.addEventListener('mousemove', handleMouseMove);
+    document.addEventListener('mouseup', handleMouseUp);
+    document.body.style.cursor = direction === 'horizontal' ? 'col-resize' : 'row-resize';
+    document.body.style.userSelect = 'none';
+  }, [chatWidth, chatHeight]);
+
+  // Cleanup resize on unmount
+  useEffect(() => {
     return () => {
-      window.removeEventListener('message', handleMessage);
+      document.body.style.cursor = '';
+      document.body.style.userSelect = '';
     };
   }, []);
 
@@ -360,11 +275,11 @@ const DocumentViewer = () => {
 
   const getChatDrawerWidth = () => {
     if (chatPosition === 'bottom') return '100%';
-    return isMobile ? '100%' : 400;
+    return isMobile ? '100%' : `${chatWidth}px`;
   };
 
   const getChatDrawerHeight = () => {
-    if (chatPosition === 'bottom') return isMobile ? '50%' : '40%';
+    if (chatPosition === 'bottom') return `${chatHeight}%`;
     return '100%';
   };
 
@@ -412,6 +327,50 @@ rm -rf temp-pdfjs pdfjs-dist.zip`}
     </Alert>
   );
 
+  // FIXED: Working resize handle component
+  const ResizeHandle = ({ direction }) => (
+    <Box
+      onMouseDown={(e) => handleResizeStart(e, direction)}
+      sx={{
+        position: 'absolute',
+        ...(direction === 'horizontal' ? {
+          left: -3,
+          top: 0,
+          width: 6,
+          height: '100%',
+          cursor: 'col-resize',
+        } : {
+          top: -3,
+          left: 0,
+          width: '100%',
+          height: 6,
+          cursor: 'row-resize',
+        }),
+        bgcolor: 'rgba(0, 0, 0, 0.1)',
+        zIndex: 1001,
+        display: 'flex',
+        alignItems: 'center',
+        justifyContent: 'center',
+        '&:hover': {
+          bgcolor: 'primary.main',
+          opacity: 0.7,
+        },
+        '&:active': {
+          bgcolor: 'primary.main',
+          opacity: 0.9,
+        },
+      }}
+    >
+      <DragIndicator 
+        sx={{ 
+          color: 'white',
+          transform: direction === 'horizontal' ? 'rotate(90deg)' : 'none',
+          fontSize: 14,
+        }} 
+      />
+    </Box>
+  );
+
   if (loading) {
     return (
       <Container maxWidth="lg" sx={{ mt: 4, textAlign: 'center' }}>
@@ -437,7 +396,16 @@ rm -rf temp-pdfjs pdfjs-dist.zip`}
   }
 
   return (
-    <Box ref={containerRef} sx={{ height: '100vh', display: 'flex', flexDirection: 'column' }}>
+    <Box 
+      ref={containerRef} 
+      sx={{ 
+        height: '100vh', 
+        display: 'flex', 
+        flexDirection: 'column', 
+        overflow: 'hidden',
+        userSelect: isResizing ? 'none' : 'auto'
+      }}
+    >
       {/* Document Header */}
       <AppBar position="static" color="default" elevation={1}>
         <Toolbar variant="dense">
@@ -479,9 +447,11 @@ rm -rf temp-pdfjs pdfjs-dist.zip`}
             <IconButton onClick={() => window.location.reload()} title="Refresh document">
               <Refresh />
             </IconButton>
-            <IconButton onClick={toggleChatPosition} title="Toggle chat position">
-              {chatPosition === 'right' ? <SwapVert /> : <SwapHoriz />}
-            </IconButton>
+            {chatOpen && (
+              <IconButton onClick={toggleChatPosition} title="Toggle chat position">
+                {chatPosition === 'right' ? <SwapVert /> : <SwapHoriz />}
+              </IconButton>
+            )}
           </Box>
         </Toolbar>
       </AppBar>
@@ -543,7 +513,9 @@ rm -rf temp-pdfjs pdfjs-dist.zip`}
             flexGrow: 1,
             overflow: 'hidden',
             position: 'relative',
-            height: chatPosition === 'bottom' && chatOpen ? 'calc(100% - 40%)' : '100%',
+            height: chatPosition === 'bottom' && chatOpen ? `calc(100% - ${chatHeight}%)` : '100%',
+            width: chatPosition === 'right' && chatOpen ? `calc(100% - ${chatWidth}px)` : '100%',
+            transition: isResizing ? 'none' : 'all 0.2s ease',
           }}
         >
           {pdfLoadError ? (
@@ -557,20 +529,20 @@ rm -rf temp-pdfjs pdfjs-dist.zip`}
               style={{ border: 'none' }}
               title="PDF Viewer"
               onLoad={() => {
-                console.log('Local PDF viewer iframe loaded');
+                console.log('PDF viewer loaded');
                 setPdfLoadError(false);
                 setSnackbar({
                   open: true,
-                  message: 'PDF loaded successfully in local viewer',
+                  message: 'PDF loaded successfully',
                   severity: 'success'
                 });
               }}
               onError={() => {
-                console.error('Local PDF viewer iframe error');
+                console.error('PDF viewer load error');
                 setPdfLoadError(true);
                 setSnackbar({
                   open: true,
-                  message: 'Failed to load PDF viewer - check setup instructions',
+                  message: 'Failed to load PDF viewer',
                   severity: 'error'
                 });
               }}
@@ -608,23 +580,33 @@ rm -rf temp-pdfjs pdfjs-dist.zip`}
           )}
         </Box>
 
-        {/* Chat Interface */}
-        {chatReadiness?.chat_ready && (
-          <Drawer
-            anchor={chatPosition === 'bottom' ? 'bottom' : 'right'}
-            open={chatOpen}
-            onClose={() => setChatOpen(false)}
-            variant="persistent"
+        {/* Resizable Chat Interface */}
+        {chatReadiness?.chat_ready && chatOpen && (
+          <Box
+            ref={chatRef}
             sx={{
-              '& .MuiDrawer-paper': {
-                width: getChatDrawerWidth(),
-                height: getChatDrawerHeight(),
-                position: 'relative',
-                borderRadius: chatPosition === 'bottom' ? '8px 8px 0 0' : '8px 0 0 8px',
-                boxShadow: theme.shadows[8],
-              },
+              position: 'relative',
+              width: getChatDrawerWidth(),
+              height: getChatDrawerHeight(),
+              backgroundColor: 'background.paper',
+              borderRadius: chatPosition === 'bottom' ? '8px 8px 0 0' : '8px 0 0 8px',
+              boxShadow: theme.shadows[8],
+              transition: isResizing ? 'none' : 'all 0.2s ease',
+              zIndex: 1200,
+              ...(chatPosition === 'right' && {
+                borderLeft: 1,
+                borderColor: 'divider',
+              }),
+              ...(chatPosition === 'bottom' && {
+                borderTop: 1,
+                borderColor: 'divider',
+              }),
             }}
           >
+            {/* Resize Handle */}
+            <ResizeHandle direction={chatPosition === 'right' ? 'horizontal' : 'vertical'} />
+
+            {/* Chat Content */}
             <Box sx={{ height: '100%', display: 'flex', flexDirection: 'column' }}>
               <Box sx={{ 
                 p: 2, 
@@ -639,13 +621,23 @@ rm -rf temp-pdfjs pdfjs-dist.zip`}
                 <Typography variant="h6">
                   Document Chat
                 </Typography>
-                <IconButton 
-                  size="small" 
-                  onClick={() => setChatOpen(false)}
-                  sx={{ color: 'inherit' }}
-                >
-                  <Close />
-                </IconButton>
+                <Box sx={{ display: 'flex', gap: 1 }}>
+                  <IconButton 
+                    size="small" 
+                    onClick={toggleChatPosition}
+                    sx={{ color: 'inherit' }}
+                    title="Toggle position"
+                  >
+                    {chatPosition === 'right' ? <SwapVert /> : <SwapHoriz />}
+                  </IconButton>
+                  <IconButton 
+                    size="small" 
+                    onClick={() => setChatOpen(false)}
+                    sx={{ color: 'inherit' }}
+                  >
+                    <Close />
+                  </IconButton>
+                </Box>
               </Box>
 
               <Box sx={{ flexGrow: 1, overflow: 'hidden' }}>
@@ -658,7 +650,7 @@ rm -rf temp-pdfjs pdfjs-dist.zip`}
                 />
               </Box>
             </Box>
-          </Drawer>
+          </Box>
         )}
       </Box>
 
