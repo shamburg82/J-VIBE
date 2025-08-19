@@ -223,10 +223,10 @@ const ChatInterface = ({
   };
 
   const handleSourceClick = useCallback((source) => {
-    console.log('Chat source clicked:', source);
+    console.log('Chat source navigation clicked:', source);
     if (onSourceClick && source.page_number) {
-      // Pass individual parameters as expected by the PDF viewer
-      onSourceClick(source.page_number, source.title);
+      // Navigate to page only - don't pass title as search text
+      onSourceClick(source.page_number);
     } else {
       console.warn('No page number found in source:', source);
     }
