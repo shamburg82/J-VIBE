@@ -360,8 +360,8 @@ if static_dir.exists():
         # Determine MIME type based on file extension
         if file_path.endswith('.css'):
             media_type = "text/css"
-        elif file_path.endswith('.js'):
-            media_type = "application/javascript"
+        elif file_path.endswith('.js') or file_path.endswith('.mjs'):
+            media_type = "application/javascript" 
         elif file_path.endswith('.json'):
             media_type = "application/json"
         elif file_path.endswith(('.png', '.jpg', '.jpeg')):
@@ -374,6 +374,18 @@ if static_dir.exists():
             media_type = "font/woff2" if file_path.endswith('.woff2') else "font/woff"
         elif file_path.endswith('.ttf'):
             media_type = "font/ttf"
+        elif file_path.endswith('.html'):
+            media_type = "text/html"
+        elif file_path.endswith('.xml'):
+            media_type = "application/xml"
+        elif file_path.endswith('.txt'):
+            media_type = "text/plain"
+        elif file_path.endswith('.pdf'):
+            media_type = "application/pdf"
+        elif file_path.endswith('.zip'):
+            media_type = "application/zip"
+        elif file_path.endswith('.map'):
+            media_type = "application/json"  # Source maps
         else:
             media_type = "application/octet-stream"
         
@@ -517,151 +529,6 @@ async def get_chat_examples():
             "Ask about statistical significance and confidence intervals"
         ]
     }
-
-@app.get("/api/v1/config/vector-store")
-async def get_vector_store_config():
-    """Get current vector store configuration."""
-    
-    try:
-        config = await document_service.get_vector_store_status()
-        return {
-            "vector_store_config": config,
-            "timestamp": datetime.now()
-        }
-    except Exception as e:
-        logger.error(f"Error getting vector store config: {e}")
-        raise HTTPException(status_code=500, detail=str(e))
-
-@app.post("/api/v1/config/vector-store/enable")
-async def enable_vector_store():
-    """Enable vector store processing for future uploads."""
-    
-    try:
-        document_service.enable_vector_store()
-        config = await document_service.get_vector_store_status()
-        
-        return {
-            "message": "Vector store processing enabled",
-            "config": config,
-            "timestamp": datetime.now()
-        }
-    except Exception as e:
-        logger.error(f"Error enabling vector store: {e}")
-        raise HTTPException(status_code=500, detail=str(e))
-
-@app.post("/api/v1/config/vector-store/disable")
-async def disable_vector_store():
-    """Disable vector store processing (files only mode)."""
-    
-    try:
-        document_service.disable_vector_store()
-        config = await document_service.get_vector_store_status()
-        
-        return {
-            "message": "Vector store processing disabled - files only mode",
-            "config": config,
-            "timestamp": datetime.now()
-        }
-    except Exception as e:
-        logger.error(f"Error disabling vector store: {e}")
-        raise HTTPException(status_code=500, detail=str(e))
-
-@app.get("/api/v1/admin/manifest")
-async def get_document_manifest():
-    """Get the raw document manifest for debugging."""
-    
-    try:
-        manifest_path = document_service.manifest_file
-        if manifest_path.exists():
-            with open(manifest_path, 'r') as f:
-                manifest = json.load(f)
-            return {
-                "manifest": manifest,
-                "manifest_path": str(manifest_path),
-                "file_size": manifest_path.stat().st_size,
-                "last_modified": datetime.fromtimestamp(manifest_path.stat().st_mtime).isoformat()
-            }
-        else:
-            return {
-                "manifest": None,
-                "manifest_path": str(manifest_path),
-                "exists": False
-            }
-    except Exception as e:
-        logger.error(f"Error reading manifest: {e}")
-        raise HTTPException(status_code=500, detail=str(e))
-
-@app.post("/api/v1/admin/rebuild-manifest")
-async def rebuild_document_manifest():
-    """Rebuild the document manifest from existing files (recovery function)."""
-    
-    try:
-        # This would scan the storage directory and rebuild the manifest
-        # Useful for recovery scenarios
-        
-        storage_path = document_service.base_storage_path
-        if not storage_path.exists():
-            raise HTTPException(status_code=404, detail="Storage path does not exist")
-        
-        rebuilt_count = 0
-        errors = []
-        
-        # Scan directory structure
-        for compound_dir in storage_path.iterdir():
-            if not compound_dir.is_dir():
-                continue
-                
-            for study_dir in compound_dir.iterdir():
-                if not study_dir.is_dir():
-                    continue
-                    
-                for deliverable_dir in study_dir.iterdir():
-                    if not deliverable_dir.is_dir():
-                        continue
-                    
-                    for file_path in deliverable_dir.glob("*.pdf"):
-                        try:
-                            # Create minimal document entry
-                            file_hash = hashlib.sha256(file_path.read_bytes()).hexdigest()
-                            doc_id = str(uuid.uuid4())
-                            
-                            doc_info = DocumentInfo(
-                                document_id=doc_id,
-                                filename=file_path.name,
-                                compound=compound_dir.name,
-                                study_id=study_dir.name,
-                                deliverable=deliverable_dir.name,
-                                file_path=str(file_path),
-                                file_hash=file_hash,
-                                status=ProcessingStatusEnum.COMPLETED,
-                                created_at=datetime.fromtimestamp(file_path.stat().st_ctime),
-                                processed_at=datetime.fromtimestamp(file_path.stat().st_mtime),
-                                total_pages=0,  # Would need PDF parsing to get actual count
-                                total_chunks=0,
-                                tlf_outputs_found=0,
-                                tlf_types_distribution={},
-                                clinical_domains_distribution={}
-                            )
-                            
-                            document_service._document_info[doc_id] = doc_info
-                            document_service._document_hashes[file_hash] = doc_id
-                            document_service._add_to_manifest(doc_id, doc_info)
-                            
-                            rebuilt_count += 1
-                            
-                        except Exception as file_error:
-                            errors.append(f"Failed to process {file_path}: {str(file_error)}")
-        
-        return {
-            "message": f"Manifest rebuilt with {rebuilt_count} documents",
-            "rebuilt_count": rebuilt_count,
-            "errors": errors,
-            "timestamp": datetime.now()
-        }
-        
-    except Exception as e:
-        logger.error(f"Error rebuilding manifest: {e}")
-        raise HTTPException(status_code=500, detail=str(e))
 
 # For running directly
 if __name__ == "__main__":
