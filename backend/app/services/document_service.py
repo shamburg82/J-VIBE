@@ -36,7 +36,7 @@ class DocumentService:
             from ..core.config import get_config
             config = get_config()
         
-        self.base_storage_path = getattr(config, 'base_storage_path', Path("//datastore/BU/RD/Restricted/DS/AIGAS/source_docs/study"))
+        self.base_storage_path = getattr(config, 'base_storage_path', Path("//datastore/BU/RD/Restricted/DS/JazzVIBE/source_docs/study"))
         
         # Ensure it's a Path object
         if not isinstance(self.base_storage_path, Path):
@@ -49,9 +49,16 @@ class DocumentService:
         self.manifest_file = self.base_storage_path / "document_manifest.json"
         self.file_manifest = self._load_manifest()
         
-        # Flag to control vector store usage (easy to revert)
-        self.use_vector_store = getattr(config, 'use_vector_store', False)
+        # Vector store configuration
+        self.use_vector_store = getattr(config, 'use_vector_store', True)
+        self.vector_store_type = getattr(config, 'vector_store_type', 'mongodb')
+        
         logger.info(f"Vector store usage: {'enabled' if self.use_vector_store else 'disabled (files only)'}")
+        logger.info(f"Vector store type: {self.vector_store_type}")
+        
+        # Check if MongoDB is properly configured
+        if self.use_vector_store and self.vector_store_type.lower() == 'mongodb':
+            self._validate_mongodb_config()
                 
         # Processing status tracking
         self._processing_status: Dict[str, ProcessingStatus] = {}
@@ -93,6 +100,23 @@ class DocumentService:
 
         # Load existing documents from manifest
         self._restore_documents_from_manifest()
+    
+    def _validate_mongodb_config(self):
+        """Validate MongoDB configuration."""
+        
+        mongodb_config = self.config.get_mongodb_config()
+        
+        # Check if we have connection string or can build one
+        if not mongodb_config['connection_string']:
+            if mongodb_config['username'] and mongodb_config['password'] and mongodb_config['host']:
+                logger.info("Building MongoDB connection string from components")
+            else:
+                logger.warning("⚠️  MongoDB configuration incomplete. Please set MONGODB_CONNECTION_STRING or individual MongoDB environment variables.")
+                logger.warning("Required environment variables:")
+                logger.warning("- MONGODB_CONNECTION_STRING (complete connection string)")
+                logger.warning("OR")
+                logger.warning("- MONGODB_USERNAME, MONGODB_PASSWORD, MONGODB_HOST")
+
 
     async def process_document_async(
         self,
@@ -159,11 +183,16 @@ class DocumentService:
             self._add_to_manifest(document_id, doc_info)
 
             if self.use_vector_store:
-                # Full processing with vector store
-                await self._process_with_vector_store(document_id, stored_file_path, doc_info)
+                if self.vector_store_type.lower() == 'mongodb':
+                    # Full processing with MongoDB vector store
+                    await self._process_with_mongodb_vector_store(document_id, stored_file_path, doc_info)
+                else:
+                    # Full processing with in-memory vector store (fallback)
+                    await self._process_with_vector_store(document_id, stored_file_path, doc_info)
             else:
                 # Minimal processing without vector store
                 await self._process_without_vector_store(document_id, stored_file_path, doc_info)
+                
                 
         except Exception as e:
             logger.error(f"Error processing document {document_id}: {e}")
@@ -173,8 +202,267 @@ class DocumentService:
                 error_message=str(e)
             )
 
+    async def _process_with_mongodb_vector_store(self, document_id: str, stored_file_path: Path, doc_info: DocumentInfo):
+        """Enhanced processing with MongoDB vector store."""
+        
+        await self._update_status(
+            document_id, ProcessingStatusEnum.EXTRACTING_TEXT, 20,
+            "Extracting text from PDF..."
+        )
+        
+        # Extract text from stored PDF
+        try:
+            documents = SimpleDirectoryReader(input_files=[str(stored_file_path)]).load_data()
+            if not documents:
+                raise ValueError("PDF contains no extractable text")
+                
+            total_pages = len(documents)
+            doc_info.total_pages = total_pages
+            
+        except Exception as pdf_error:
+            logger.error(f"PDF extraction failed: {pdf_error}")
+            await self._update_status(
+                document_id, ProcessingStatusEnum.FAILED, 0,
+                f"PDF extraction failed: {str(pdf_error)}",
+                error_message=str(pdf_error)
+            )
+            return
+        
+        await self._update_status(
+            document_id, ProcessingStatusEnum.CHUNKING, 40,
+            f"Chunking document ({total_pages} pages) for MongoDB storage...",
+            total_pages=total_pages
+        )
+    
+        # Create nodes directly using the text splitter first
+        try:
+            # First create initial nodes from documents
+            from llama_index.core.schema import TextNode
+            initial_nodes = []
+            
+            for doc_idx, doc in enumerate(documents):
+                # Split text into chunks first
+                text_chunks = self.text_splitter.split_text(doc.text)
+                
+                for chunk_idx, chunk_text in enumerate(text_chunks):
+                    if chunk_text.strip():
+                        node = TextNode(
+                            text=chunk_text,
+                            id_=f"{document_id}_doc{doc_idx}_chunk{chunk_idx}",
+                            metadata={
+                                "document_id": document_id,
+                                "page_number": doc.metadata.get("page_label", doc_idx + 1),
+                                "source": doc.metadata.get("file_name", stored_file_path.name),
+                                "doc_idx": doc_idx,
+                                "chunk_idx": chunk_idx,
+                                "storage_type": "mongodb",
+                                "created_at": datetime.now().isoformat()
+                            }
+                        )
+                        initial_nodes.append(node)
+            
+            logger.info(f"Created {len(initial_nodes)} initial nodes for MongoDB storage")
+            
+            if not initial_nodes:
+                raise ValueError("No text chunks created")
+            
+            await self._update_status(
+                document_id, ProcessingStatusEnum.EXTRACTING_TLF_METADATA, 50,
+                f"Extracting TLF metadata from {len(initial_nodes)} chunks..."
+            )
+        
+            # Apply extractors (same as before but with MongoDB awareness)
+            logger.info("Running extraction pipeline for MongoDB...")
+            
+            # Apply TLF extraction first (most important)
+            doc_nodes = self.tlf_extractor(initial_nodes)
+            logger.info(f"TLF extraction complete, {len(doc_nodes)} nodes ready for MongoDB")
+            
+            # Then apply other extractors if enabled
+            await self._apply_additional_extractors(doc_nodes, document_id)
+            
+            # Verify we have nodes
+            if not doc_nodes:
+                raise ValueError("No nodes after extraction")
+            
+            # Log MongoDB-specific information
+            mongodb_metadata_count = sum(1 for node in doc_nodes if node.metadata.get("storage_type") == "mongodb")
+            logger.info(f"Prepared {mongodb_metadata_count} nodes with MongoDB metadata")
+            
+        except Exception as processing_error:
+            logger.error(f"Processing error: {processing_error}")
+            logger.exception("Full processing error:")
+            
+            # Fallback: Create basic nodes with TLF extraction only
+            logger.info("Falling back to basic TLF extraction for MongoDB")
+            doc_nodes = await self._create_fallback_nodes(documents, document_id, stored_file_path)
+        
+        if not doc_nodes:
+            raise ValueError("No nodes created from document")
+        
+        await self._update_status(
+            document_id, ProcessingStatusEnum.BUILDING_INDEX, 85,
+            f"Storing {len(doc_nodes)} nodes in MongoDB Atlas vector store..."
+        )
+        
+        # Store in MongoDB vector index
+        try:
+            await self.storage_service.create_index(document_id, doc_nodes)
+            logger.info(f"✅ Successfully stored {len(doc_nodes)} nodes in MongoDB for document {document_id}")
+        except Exception as mongo_error:
+            logger.error(f"❌ MongoDB storage failed: {mongo_error}")
+            # Could fallback to in-memory storage here if desired
+            raise
+        
+        # Count TLF outputs found
+        tlf_outputs = await self._count_tlf_outputs(doc_nodes)
+        
+        # Update document info
+        doc_info.status = ProcessingStatusEnum.COMPLETED
+        doc_info.processed_at = datetime.now()
+        doc_info.total_chunks = len(doc_nodes)
+        doc_info.tlf_outputs_found = tlf_outputs["total"]
+        doc_info.tlf_types_distribution = tlf_outputs["types"]
+        doc_info.clinical_domains_distribution = tlf_outputs["domains"]
+        
+        await self._update_status(
+            document_id, ProcessingStatusEnum.COMPLETED, 100,
+            f"Processing complete! Stored {len(doc_nodes)} chunks in MongoDB. Found {tlf_outputs['total']} TLF outputs.",
+            total_pages=total_pages,
+            total_chunks=len(doc_nodes),
+            tlf_outputs_found=tlf_outputs["total"]
+        )
+        
+        # Update manifest
+        self._add_to_manifest(document_id, doc_info)
+        
+        logger.info(f"✅ Successfully processed document {document_id} with MongoDB vector store")
+
+    async def _apply_additional_extractors(self, doc_nodes: List, document_id: str):
+        """Apply additional extractors (keyword, question) with progress updates."""
+        
+        try:
+            from llama_index.core.extractors import KeywordExtractor, QuestionsAnsweredExtractor
+            
+            # Apply keyword extraction in batches
+            if self.llm and getattr(self, 'enable_keyword_extraction', True):
+                await self._update_status(
+                    document_id, ProcessingStatusEnum.EXTRACTING_TLF_METADATA, 60,
+                    "Extracting keywords..."
+                )
+                
+                keyword_extractor = KeywordExtractor(keywords=10, llm=self.llm)
+                
+                # Process in smaller batches to show progress
+                batch_size = 10
+                for i in range(0, len(doc_nodes), batch_size):
+                    batch = doc_nodes[i:i+batch_size]
+                    progress = 60 + int((i / len(doc_nodes)) * 10)  # 60-70% for keywords
+                    
+                    await self._update_status(
+                        document_id, ProcessingStatusEnum.EXTRACTING_TLF_METADATA, progress,
+                        f"Extracting keywords: {i+1}-{min(i+batch_size, len(doc_nodes))}/{len(doc_nodes)}..."
+                    )
+                    
+                    # Apply keyword extraction to batch
+                    try:
+                        # Keyword extractor modifies nodes in place
+                        keyword_extractor(batch)
+                    except Exception as ke:
+                        logger.warning(f"Keyword extraction failed for batch: {ke}")
+                
+                logger.info("Keyword extraction complete")
+            
+            # Apply question extraction if enabled
+            if self.llm and getattr(self, 'enable_question_extraction', True):
+                await self._update_status(
+                    document_id, ProcessingStatusEnum.EXTRACTING_TLF_METADATA, 70,
+                    "Generating questions..."
+                )
+                
+                question_extractor = QuestionsAnsweredExtractor(
+                    questions=3,
+                    llm=self.llm,
+                    prompt_template="""
+                    Given the following clinical trial text, generate {num_questions} questions 
+                    that this text can answer. Focus on clinical, statistical, and regulatory aspects.
+                    
+                    Text: {context_str}
+                    
+                    Questions:
+                    """
+                )
+                
+                # Process in smaller batches
+                batch_size = 5  # Smaller batches for question generation (more expensive)
+                for i in range(0, len(doc_nodes), batch_size):
+                    batch = doc_nodes[i:i+batch_size]
+                    progress = 70 + int((i / len(doc_nodes)) * 10)  # 70-80% for questions
+                    
+                    await self._update_status(
+                        document_id, ProcessingStatusEnum.EXTRACTING_TLF_METADATA, progress,
+                        f"Generating questions: {i+1}-{min(i+batch_size, len(doc_nodes))}/{len(doc_nodes)}..."
+                    )
+                    
+                    try:
+                        # Question extractor modifies nodes in place
+                        question_extractor(batch)
+                    except Exception as qe:
+                        logger.warning(f"Question extraction failed for batch: {qe}")
+                
+                logger.info("Question extraction complete")
+            
+        except Exception as extractor_error:
+            logger.warning(f"Additional extractors failed: {extractor_error}, continuing with TLF metadata only")
+
+    async def _create_fallback_nodes(self, documents: List, document_id: str, stored_file_path: Path) -> List:
+        """Create fallback nodes when full processing fails."""
+        
+        from llama_index.core.schema import TextNode
+        doc_nodes = []
+        
+        total_docs = len(documents)
+        for doc_idx, doc in enumerate(documents):
+            progress = 50 + int((doc_idx / total_docs) * 30)
+            await self._update_status(
+                document_id, ProcessingStatusEnum.EXTRACTING_TLF_METADATA, progress,
+                f"Processing document {doc_idx+1}/{total_docs} (fallback mode)..."
+            )
+            
+            text_chunks = self.text_splitter.split_text(doc.text)
+            
+            for chunk_idx, chunk_text in enumerate(text_chunks):
+                if chunk_text.strip():
+                    node = TextNode(
+                        text=chunk_text,
+                        id_=f"{document_id}_fallback_{doc_idx}_{chunk_idx}",
+                        metadata={
+                            "document_id": document_id,
+                            "page_number": doc.metadata.get("page_label", doc_idx + 1),
+                            "source": stored_file_path.name,
+                            "storage_type": "mongodb",
+                            "fallback_mode": True,
+                            "created_at": datetime.now().isoformat()
+                        }
+                    )
+                    doc_nodes.append(node)
+        
+        # Apply TLF extraction
+        if doc_nodes:
+            await self._update_status(
+                document_id, ProcessingStatusEnum.EXTRACTING_TLF_METADATA, 75,
+                f"Applying TLF extraction to {len(doc_nodes)} nodes (fallback)..."
+            )
+            doc_nodes = self.tlf_extractor(doc_nodes)
+            logger.info(f"Fallback: Applied TLF extraction to {len(doc_nodes)} nodes for MongoDB")
+        
+        return doc_nodes
+
+    # Keep the existing _process_with_vector_store method for fallback compatibility
     async def _process_with_vector_store(self, document_id: str, stored_file_path: Path, doc_info: DocumentInfo):
-        """Full processing with vector store (original method)."""
+        """Full processing with in-memory vector store (fallback method)."""
+        
+        logger.info(f"Using in-memory vector store for document {document_id}")
         
         await self._update_status(
             document_id, ProcessingStatusEnum.EXTRACTING_TEXT, 20,
@@ -248,92 +536,11 @@ class DocumentService:
             logger.info(f"TLF extraction complete, {len(doc_nodes)} nodes")
             
             # Then apply other extractors if enabled
-            try:
-                from llama_index.core.extractors import KeywordExtractor, QuestionsAnsweredExtractor
-                
-                # Apply keyword extraction in batches
-                if self.llm and getattr(self, 'enable_keyword_extraction', True):
-                    await self._update_status(
-                        document_id, ProcessingStatusEnum.EXTRACTING_TLF_METADATA, 60,
-                        "Extracting keywords..."
-                    )
-                    
-                    keyword_extractor = KeywordExtractor(keywords=10, llm=self.llm)
-                    
-                    # Process in smaller batches to show progress
-                    batch_size = 10
-                    for i in range(0, len(doc_nodes), batch_size):
-                        batch = doc_nodes[i:i+batch_size]
-                        progress = 60 + int((i / len(doc_nodes)) * 10)  # 60-70% for keywords
-                        
-                        await self._update_status(
-                            document_id, ProcessingStatusEnum.EXTRACTING_TLF_METADATA, progress,
-                            f"Extracting keywords: {i+1}-{min(i+batch_size, len(doc_nodes))}/{len(doc_nodes)}..."
-                        )
-                        
-                        # Apply keyword extraction to batch
-                        try:
-                            # Keyword extractor modifies nodes in place
-                            keyword_extractor(batch)
-                        except Exception as ke:
-                            logger.warning(f"Keyword extraction failed for batch: {ke}")
-                    
-                    logger.info("Keyword extraction complete")
-                
-                # Apply question extraction if enabled
-                if self.llm and getattr(self, 'enable_question_extraction', True):
-                    await self._update_status(
-                        document_id, ProcessingStatusEnum.EXTRACTING_TLF_METADATA, 70,
-                        "Generating questions..."
-                    )
-                    
-                    question_extractor = QuestionsAnsweredExtractor(
-                        questions=3,
-                        llm=self.llm,
-                        prompt_template="""
-                        Given the following clinical trial text, generate {num_questions} questions 
-                        that this text can answer. Focus on clinical, statistical, and regulatory aspects.
-                        
-                        Text: {context_str}
-                        
-                        Questions:
-                        """
-                    )
-                    
-                    # Process in smaller batches
-                    batch_size = 5  # Smaller batches for question generation (more expensive)
-                    for i in range(0, len(doc_nodes), batch_size):
-                        batch = doc_nodes[i:i+batch_size]
-                        progress = 70 + int((i / len(doc_nodes)) * 10)  # 70-80% for questions
-                        
-                        await self._update_status(
-                            document_id, ProcessingStatusEnum.EXTRACTING_TLF_METADATA, progress,
-                            f"Generating questions: {i+1}-{min(i+batch_size, len(doc_nodes))}/{len(doc_nodes)}..."
-                        )
-                        
-                        try:
-                            # Question extractor modifies nodes in place
-                            question_extractor(batch)
-                        except Exception as qe:
-                            logger.warning(f"Question extraction failed for batch: {qe}")
-                    
-                    logger.info("Question extraction complete")
-                
-            except Exception as extractor_error:
-                logger.warning(f"Additional extractors failed: {extractor_error}, continuing with TLF metadata only")
+            await self._apply_additional_extractors(doc_nodes, document_id)
             
             # Verify we have nodes
             if not doc_nodes:
                 raise ValueError("No nodes after extraction")
-            
-            # Log sample metadata
-            if doc_nodes:
-                sample_metadata = doc_nodes[0].metadata
-                logger.info(f"Sample node metadata keys: {list(sample_metadata.keys())}")
-                if 'keywords' in sample_metadata:
-                    logger.info(f"Sample keywords: {sample_metadata.get('keywords', [])[:5]}")
-                if 'questions_this_excerpt_can_answer' in sample_metadata:
-                    logger.info(f"Sample questions: {sample_metadata.get('questions_this_excerpt_can_answer', [])[:2]}")
             
         except Exception as processing_error:
             logger.error(f"Processing error: {processing_error}")
@@ -341,40 +548,7 @@ class DocumentService:
             
             # Fallback: Create basic nodes with TLF extraction only
             logger.info("Falling back to basic TLF extraction")
-            from llama_index.core.schema import TextNode
-            doc_nodes = []
-            
-            total_docs = len(documents)
-            for doc_idx, doc in enumerate(documents):
-                progress = 50 + int((doc_idx / total_docs) * 30)
-                await self._update_status(
-                    document_id, ProcessingStatusEnum.EXTRACTING_TLF_METADATA, progress,
-                    f"Processing document {doc_idx+1}/{total_docs} (fallback mode)..."
-                )
-                
-                text_chunks = self.text_splitter.split_text(doc.text)
-                
-                for chunk_idx, chunk_text in enumerate(text_chunks):
-                    if chunk_text.strip():
-                        node = TextNode(
-                            text=chunk_text,
-                            id_=f"{document_id}_fallback_{doc_idx}_{chunk_idx}",
-                            metadata={
-                                "document_id": document_id,
-                                "page_number": doc.metadata.get("page_label", doc_idx + 1),
-                                "source": stored_file_path.name
-                            }
-                        )
-                        doc_nodes.append(node)
-            
-            # Apply TLF extraction
-            if doc_nodes:
-                await self._update_status(
-                    document_id, ProcessingStatusEnum.EXTRACTING_TLF_METADATA, 75,
-                    f"Applying TLF extraction to {len(doc_nodes)} nodes..."
-                )
-                doc_nodes = self.tlf_extractor(doc_nodes)
-                logger.info(f"Fallback: Applied TLF extraction to {len(doc_nodes)} nodes")
+            doc_nodes = await self._create_fallback_nodes(documents, document_id, stored_file_path)
         
         if not doc_nodes:
             raise ValueError("No nodes created from document")
@@ -384,7 +558,7 @@ class DocumentService:
             f"Building vector index with {len(doc_nodes)} nodes..."
         )
         
-        # Store in vector index
+        # Store in vector index (in-memory)
         await self.storage_service.create_index(document_id, doc_nodes)
         
         # Count TLF outputs found
@@ -409,7 +583,7 @@ class DocumentService:
         # Update manifest
         self._add_to_manifest(document_id, doc_info)
         
-        logger.info(f"Successfully processed document {document_id} with vector store")
+        logger.info(f"Successfully processed document {document_id} with in-memory vector store")
 
     # Handle when vector processing is disabled
     async def _process_without_vector_store(self, document_id: str, stored_file_path: Path, doc_info: DocumentInfo):
@@ -793,6 +967,7 @@ class DocumentService:
                 "created_at": doc.created_at,
                 "processed_at": doc.processed_at,
                 "has_vector_index": self.use_vector_store and doc.status == ProcessingStatusEnum.COMPLETED,
+                "vector_store_type": self.vector_store_type if self.use_vector_store else None,
                 "file_exists": Path(doc.file_path).exists() if doc.file_path else False,
             }
             
@@ -832,7 +1007,11 @@ class DocumentService:
             
             # Remove from vector storage if using vector store
             if self.use_vector_store:
-                await self.storage_service.delete_index(document_id)
+                success = await self.storage_service.delete_index(document_id)
+                if success:
+                    logger.info(f"✅ Deleted vector index for document {document_id} from {self.vector_store_type}")
+                else:
+                    logger.warning(f"⚠️  Failed to delete vector index for document {document_id}")
             
             # Remove physical file if it exists and no other documents reference it
             if doc_info and hasattr(doc_info, 'file_path'):
@@ -849,6 +1028,8 @@ class DocumentService:
                     if not other_docs_with_same_file:
                         file_path.unlink()
                         logger.info(f"Deleted file: {file_path}")
+                    else:
+                        logger.info(f"File kept - referenced by {len(other_docs_with_same_file)} other documents")
             
             # Remove from hash tracking
             if doc_info and hasattr(doc_info, 'file_hash'):
@@ -935,6 +1116,7 @@ class DocumentService:
             "tlf_types_distribution": document_info.tlf_types_distribution,
             "clinical_domains_distribution": document_info.clinical_domains_distribution,
             "has_vector_index": self.use_vector_store,
+            "vector_store_type": self.vector_store_type if self.use_vector_store else None,
         }
         self._save_manifest()
 
@@ -988,10 +1170,11 @@ class DocumentService:
 
     # **WORKAROUND: Methods to toggle vector store usage**
     
-    def enable_vector_store(self):
+    def enable_vector_store(self, vector_store_type: str = "mongodb"):
         """Enable vector store processing for future documents."""
         self.use_vector_store = True
-        logger.info("Vector store processing enabled")
+        self.vector_store_type = vector_store_type
+        logger.info(f"Vector store processing enabled - Type: {vector_store_type}")
 
     def disable_vector_store(self):
         """Disable vector store processing (files only mode)."""
@@ -1000,8 +1183,13 @@ class DocumentService:
 
     async def get_vector_store_status(self) -> Dict[str, Any]:
         """Get current vector store configuration and status."""
+        
+        # Get storage info from the storage service
+        storage_info = await self.storage_service.get_storage_info()
+
         return {
             "enabled": self.use_vector_store,
+            "type": self.vector_store_type if self.use_vector_store else None,
             "documents_with_vector_index": len([
                 doc for doc in self._document_info.values() 
                 if doc.status == ProcessingStatusEnum.COMPLETED and self.use_vector_store
@@ -1012,5 +1200,45 @@ class DocumentService:
             ]),
             "total_documents": len(self._document_info),
             "manifest_path": str(self.manifest_file),
-            "storage_path": str(self.base_storage_path)
+            "storage_path": str(self.base_storage_path),
+            "storage_service_info": storage_info
         }
+
+    async def get_mongodb_statistics(self) -> Dict[str, Any]:
+        """Get MongoDB-specific statistics."""
+        
+        if not self.use_vector_store or self.vector_store_type.lower() != 'mongodb':
+            return {
+                "mongodb_enabled": False,
+                "message": "MongoDB vector store is not enabled"
+            }
+        
+        try:
+            # Get storage info from MongoDB storage service
+            storage_info = await self.storage_service.get_storage_info()
+            
+            # Add document service specific statistics
+            processed_docs = [doc for doc in self._document_info.values() 
+                            if doc.status == ProcessingStatusEnum.COMPLETED]
+            
+            return {
+                "mongodb_enabled": True,
+                "storage_info": storage_info,
+                "document_service_stats": {
+                    "total_documents": len(self._document_info),
+                    "processed_documents": len(processed_docs),
+                    "documents_with_mongodb_storage": len([
+                        doc for doc in processed_docs 
+                        if self.use_vector_store and self.vector_store_type.lower() == 'mongodb'
+                    ]),
+                    "average_processing_time": await self.get_average_processing_time(),
+                    "total_tlf_outputs": sum(doc.tlf_outputs_found for doc in processed_docs)
+                }
+            }
+            
+        except Exception as e:
+            logger.error(f"Error getting MongoDB statistics: {e}")
+            return {
+                "mongodb_enabled": True,
+                "error": str(e)
+            }
