@@ -1,4 +1,4 @@
-# backend/main.py (Clean production version)
+# backend/main.py
 import os
 import subprocess
 import logging
@@ -88,6 +88,19 @@ async def lifespan(app: FastAPI):
             from app.core.config import get_config
             config = get_config()
         
+        # Log configuration details
+        logger.info(f"Vector store configuration:")
+        logger.info(f"  - Enabled: {config.use_vector_store}")
+        logger.info(f"  - Type: {config.vector_store_type}")
+        
+        if config.is_mongodb_enabled():
+            mongodb_config = config.get_mongodb_config()
+            logger.info(f"MongoDB configuration:")
+            logger.info(f"  - Host: {mongodb_config['host']}")
+            logger.info(f"  - Database: {mongodb_config['database_name']}")
+            logger.info(f"  - Collection: {mongodb_config['collection_name']}")
+            logger.info(f"  - Connection string configured: {bool(mongodb_config['connection_string'])}")
+        
         # Initialize Bedrock LLM with appropriate setup
         if is_connect or is_workbench:
             try:
@@ -104,41 +117,98 @@ async def lifespan(app: FastAPI):
         if not llm:
             raise Exception("Failed to initialize Bedrock LLM")
         
-        # Initialize services with config
-        from app.services.storage_service import StorageService
-        from app.services.document_service import DocumentService
-        from app.services.query_service import QueryService
-        from app.services.chat_service import ChatService
+        # Initialize storage service based on configuration
+        logger.info("🗄️  Initializing storage service...")
         
-        storage_service = StorageService()
+        if config.is_mongodb_enabled():
+            logger.info("📊 Initializing MongoDB Atlas vector store...")
+            from app.services.storage_service import StorageService
+            
+            mongodb_config = config.get_mongodb_config()
+            storage_service = StorageService(
+                mongodb_connection_string=mongodb_config['connection_string'],
+                database_name=mongodb_config['database_name'],
+                collection_name=mongodb_config['collection_name']
+            )
+            
+            logger.info("✅ MongoDB storage service initialized")
+            
+            # Test MongoDB connection
+            try:
+                storage_info = await storage_service.get_storage_info()
+                logger.info(f"✅ MongoDB connection verified - Database: {storage_info.get('database_name')}")
+                logger.info(f"📊 Current MongoDB stats: {storage_info.get('total_vectors', 0)} vectors, {storage_info.get('unique_documents', 0)} documents")
+            except Exception as mongo_test_error:
+                logger.error(f"❌ MongoDB connection test failed: {mongo_test_error}")
+                logger.warning("⚠️  Continuing with initialization - MongoDB may not be fully configured")
+        
+        else:
+            logger.info("💾 Using in-memory vector store (fallback)")
+            # Import the original in-memory storage service
+            try:
+                # Try to import an in-memory version if it exists
+                from app.services.storage_service_memory import InMemoryStorageService
+                storage_service = InMemoryStorageService()
+            except ImportError:
+                # Use the MongoDB storage service but it will handle the error gracefully
+                from app.services.storage_service import StorageService
+                storage_service = StorageService()
+                logger.warning("⚠️  MongoDB storage service loaded but will use fallback behavior")
+        
+        # Initialize document service
+        logger.info("📄 Initializing document service...")
+        from app.services.document_service import DocumentService
         document_service = DocumentService(
             llm=llm, 
             storage_service=storage_service,
             config=config
         )
+        logger.info("✅ Document service initialized")
+        
+        # Initialize query service
+        logger.info("🔍 Initializing query service...")
+        from app.services.query_service import QueryService
         query_service = QueryService(llm=llm, storage_service=storage_service)
+        logger.info("✅ Query service initialized")
         
         # Initialize chat service
+        logger.info("💬 Initializing chat service...")
+        from app.services.chat_service import ChatService
         chat_service = ChatService(
             llm=llm, 
             storage_service=storage_service, 
             query_service=query_service
         )
+        logger.info("✅ Chat service initialized")
         
+        # Get final status
+        vector_status = await document_service.get_vector_store_status()
         logger.info("✅ All services initialized successfully")
-        if config and hasattr(config, 'get_storage_path'):
-            logger.info(f"📁 Storage path: {config.get_storage_path()}")
-        elif config and hasattr(config, 'base_storage_path'):
-            logger.info(f"📁 Storage path: {config.base_storage_path}")
+        logger.info(f"📊 System ready - Vector store: {vector_status.get('type', 'none')}")
+        logger.info(f"📁 Document storage: {vector_status.get('storage_path', 'unknown')}")
+        
+        if vector_status.get('storage_service_info'):
+            storage_info = vector_status['storage_service_info']
+            if storage_info.get('storage_type') == 'mongodb_atlas':
+                logger.info(f"🗄️  MongoDB: {storage_info.get('total_vectors', 0)} vectors, {storage_info.get('storage_size_mb', 0)}MB")
         
     except Exception as e:
         logger.error(f"❌ Failed to initialize services: {e}")
+        logger.exception("Service initialization error details:")
         raise
     
     yield
     
     # Shutdown
     logger.info("🛑 Shutting down TLF Analyzer API")
+    
+    # Clean up MongoDB connections
+    if storage_service and hasattr(storage_service, 'close_connection'):
+        try:
+            storage_service.close_connection()
+            logger.info("✅ MongoDB connections closed")
+        except Exception as e:
+            logger.warning(f"⚠️  Error closing MongoDB connections: {e}")
 
 class PathNormalizationMiddleware(BaseHTTPMiddleware):
     """Middleware to normalize paths for Posit environments."""
@@ -314,6 +384,8 @@ except ImportError as e:
 # Direct health endpoint
 @app.get("/health")
 async def health_check():
+    vector_status = await document_service.get_vector_store_status() if document_service else {}
+    
     return {
         "status": "healthy",
         "root_path": root_path,
@@ -327,6 +399,11 @@ async def health_check():
             "query_service": query_service is not None,
             "storage_service": storage_service is not None,
             "chat_service": chat_service is not None
+        },
+        "vector_store": {
+            "enabled": vector_status.get("enabled", False),
+            "type": vector_status.get("type", "unknown"),
+            "total_documents": vector_status.get("total_documents", 0)
         }
     }
 
@@ -334,16 +411,56 @@ async def health_check():
 @app.get("/api/v1/health")
 async def health_no_slash():
     """Health endpoint without trailing slash to match frontend expectations."""
+    
+    vector_status = await document_service.get_vector_store_status() if document_service else {}
+    storage_info = vector_status.get('storage_service_info', {})
+    
     return {
         "status": "healthy",
         "timestamp": datetime.now(),
         "services": {
             "api": "healthy",
             "bedrock": "healthy" if document_service else "not_initialized",
-            "storage": "healthy" if storage_service else "not_initialized"
+            "storage": "healthy" if storage_service else "not_initialized",
+            "mongodb": "healthy" if storage_info.get('storage_type') == 'mongodb_atlas' else "not_configured"
+        },
+        "storage_info": {
+            "type": storage_info.get('storage_type', 'unknown'),
+            "total_vectors": storage_info.get('total_vectors', 0),
+            "unique_documents": storage_info.get('unique_documents', 0),
+            "storage_size_mb": storage_info.get('storage_size_mb', 0)
         },
         "version": "1.0.0"
     }
+
+# MongoDB-specific endpoints
+@app.get("/api/v1/mongodb/status")
+async def get_mongodb_status():
+    """Get MongoDB Atlas vector store status and statistics."""
+    
+    if not document_service:
+        raise HTTPException(status_code=503, detail="Document service not initialized")
+    
+    try:
+        mongodb_stats = await document_service.get_mongodb_statistics()
+        return mongodb_stats
+    except Exception as e:
+        logger.error(f"Error getting MongoDB status: {e}")
+        raise HTTPException(status_code=500, detail=f"Failed to get MongoDB status: {str(e)}")
+
+@app.get("/api/v1/storage/info")
+async def get_storage_info():
+    """Get detailed storage information."""
+    
+    if not storage_service:
+        raise HTTPException(status_code=503, detail="Storage service not initialized")
+    
+    try:
+        storage_info = await storage_service.get_storage_info()
+        return storage_info
+    except Exception as e:
+        logger.error(f"Error getting storage info: {e}")
+        raise HTTPException(status_code=500, detail=f"Failed to get storage info: {str(e)}")
 
 # Static files and specific routes
 if static_dir.exists():
@@ -413,12 +530,18 @@ if static_dir.exists():
         
         # If the request specifically wants JSON (API clients/tests)
         if ("application/json" in accept_header and "text/html" not in accept_header):
+            vector_status = await document_service.get_vector_store_status() if document_service else {}
+            
             return {
                 "message": "JazzVIBE API",
                 "version": "1.0.0", 
                 "root_path": root_path,
                 "docs": f"{root_path}/docs" if root_path else "/docs",
-                "health": f"{root_path}/api/v1/health" if root_path else "/api/v1/health"
+                "health": f"{root_path}/api/v1/health" if root_path else "/api/v1/health",
+                "vector_store": {
+                    "enabled": vector_status.get("enabled", False),
+                    "type": vector_status.get("type", "unknown")
+                }
             }
         
         # Otherwise, serve React app (browsers)
@@ -439,11 +562,17 @@ else:
     
     @app.get("/")
     async def root():
+        vector_status = await document_service.get_vector_store_status() if document_service else {}
+        
         return {
             "message": "JazzVIBE API",
             "version": "1.0.0",
             "root_path": root_path,
-            "error": "React app not built"
+            "error": "React app not built",
+            "vector_store": {
+                "enabled": vector_status.get("enabled", False),
+                "type": vector_status.get("type", "unknown")
+            }
         }
 
 # Additional convenience endpoints for chat integration
@@ -476,6 +605,14 @@ async def check_document_chat_ready(document_id: str):
         # Get available sources for context
         sources = await query_service.get_available_sources(document_id)
         
+        # Get storage statistics for this document
+        doc_stats = {}
+        if hasattr(storage_service, 'get_document_statistics'):
+            try:
+                doc_stats = await storage_service.get_document_statistics(document_id)
+            except Exception as e:
+                logger.warning(f"Could not get document statistics: {e}")
+        
         return {
             "chat_ready": True,
             "status": "ready",
@@ -486,7 +623,8 @@ async def check_document_chat_ready(document_id: str):
                 "total_chunks": doc_info.total_chunks,
                 "tlf_outputs_found": doc_info.tlf_outputs_found
             },
-            "available_sources": sources
+            "available_sources": sources,
+            "storage_stats": doc_stats
         }
         
     except Exception as e:
