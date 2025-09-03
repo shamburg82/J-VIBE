@@ -41,8 +41,9 @@ class Config:
     aws_secret_access_key: Optional[str] = None
     
     # Bedrock Settings
-    llm_model_id: str = "arn:aws:bedrock:us-west-2:912115013020:inference-profile/us.anthropic.claude-3-7-sonnet-20250219-v1:0"
-    embedding_model_id: str = "amazon.titan-embed-text-v2"
+    llm_model_arn: str = "arn:aws:bedrock:us-west-2:912115013020:inference-profile/us.anthropic.claude-3-7-sonnet-20250219-v1:0"
+    llm_model_id: str = "anthropic.claude-3-7-sonnet-20250219-v1:0"
+    embedding_model_id: str = "amazon.titan-embed-text-v1"
     temperature: float = 0.2
     max_tokens: int = 4096
     
@@ -80,6 +81,7 @@ class Config:
         """Get AWS configuration dictionary."""
         return {
             "region": self.aws_region,
+            "llm_model_arn": self.llm_model_arn,
             "llm_model_id": self.llm_model_id,
             "embedding_model_id": self.embedding_model_id,
             "temperature": self.temperature,
@@ -109,6 +111,25 @@ class Config:
 def get_config() -> Config:
     """Get application configuration from environment variables."""
     
+    # Get base model identifiers
+    llm_model_arn = os.getenv("LLM_MODEL_ARN", "arn:aws:bedrock:us-west-2:912115013020:inference-profile/us.anthropic.claude-3-7-sonnet-20250219-v1:0")
+    llm_model_id = os.getenv("LLM_MODEL_ID", "anthropic.claude-3-7-sonnet-20250219-v1:0")
+    
+    # If only one is provided, try to derive the other
+    if not llm_model_arn and llm_model_id:
+        # If we only have model ID, we can't create ARN (need account info)
+        llm_model_arn = llm_model_id  # Fallback to model ID
+        
+    elif llm_model_arn and not llm_model_id:
+        # Try to extract model ID from ARN
+        if "anthropic.claude" in llm_model_arn:
+            # Extract model ID from ARN
+            parts = llm_model_arn.split("/")
+            if len(parts) > 1:
+                llm_model_id = parts[-1]
+            else:
+                llm_model_id = "anthropic.claude-3-7-sonnet-20250219-v1:0"  # Default fallback
+    
     return Config(
         # AWS Settings
         aws_region=os.getenv("AWS_REGION", "us-west-2"),
@@ -116,7 +137,8 @@ def get_config() -> Config:
         aws_secret_access_key=os.getenv("AWS_SECRET_ACCESS_KEY"),
         
         # Bedrock Settings
-        llm_model_id=os.getenv("LLM_MODEL_ID", "arn:aws:bedrock:us-west-2:912115013020:inference-profile/us.anthropic.claude-3-7-sonnet-20250219-v1:0"),
+        llm_model_arn=llm_model_arn,  # ARN for LlamaIndex
+        llm_model_id=llm_model_id,  # Model ID for direct calls
         embedding_model_id=os.getenv("EMBEDDING_MODEL_ID", "amazon.titan-embed-text-v1"),
         temperature=float(os.getenv("TEMPERATURE", "0.2")),
         max_tokens=int(os.getenv("MAX_TOKENS", "4096")),
