@@ -44,7 +44,7 @@ async def configure_bedrock_for_posit() -> Optional[BedrockConverse]:
         
         # Create Bedrock LLM with environment-specific settings
         llm = BedrockConverse(
-            model=aws_config.get("llm_model_id"),
+            model=aws_config.get("llm_model_arn"),
             region_name=aws_config.get("region"),
             temperature=aws_config.get("temperature"),
             max_tokens=aws_config.get("max_tokens"),
@@ -170,7 +170,7 @@ def get_bedrock_model_info(config) -> dict:
         amazon_models = bedrock.list_foundation_models(byProvider='amazon')
         
         return {
-            "current_llm_model": config.llm_model_id,
+            "current_llm_model": config.llm_model_arn,
             "current_embedding_model": config.embedding_model_id,
             "available_anthropic_models": len(anthropic_models.get('modelSummaries', [])),
             "available_amazon_models": len(amazon_models.get('modelSummaries', [])),
@@ -180,7 +180,7 @@ def get_bedrock_model_info(config) -> dict:
     except Exception as e:
         logger.warning(f"Could not retrieve Bedrock model info: {e}")
         return {
-            "current_llm_model": config.llm_model_id,
+            "current_llm_model": config.llm_model_arn,
             "current_embedding_model": config.embedding_model_id,
             "error": str(e)
         }
