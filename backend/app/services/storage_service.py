@@ -72,10 +72,17 @@ class StorageService:
         """Initialize MongoDB client and vector store."""
         
         try:
-            logger.info(f"Connecting to MongoDB at: {self.mongodb_connection_string.split('@')[-1]}")  # Don't log credentials
+            logger.info("Connecting to MongoDB Atlas...")
+            logger.info(f"Connection target: {self.mongodb_connection_string.split('@')[-1] if '@' in self.mongodb_connection_string else 'Unknown'}")
             
-            # Create MongoDB client
-            self._mongo_client = MongoClient(self.mongodb_connection_string)
+            # Create MongoDB client with timeout settings
+            self._mongo_client = MongoClient(
+                self.mongodb_connection_string,
+                serverSelectionTimeoutMS=30000,  # 30 second timeout
+                connectTimeoutMS=20000,          # 20 second connection timeout
+                maxPoolSize=10,                  # Limit connection pool
+                retryWrites=True
+            )
             
             # Test connection
             self._mongo_client.admin.command('ping')
@@ -93,7 +100,7 @@ class StorageService:
                 mongodb_client=self._mongo_client,
                 database_name=self.database_name,
                 collection_name=self.collection_name,
-                index_name="vector_index",  # Name of the search index
+                vector_index_name="vector_index",  # Name of the search index
                 embedding_key="embedding",  # Field name for embeddings
                 text_key="text",           # Field name for text content
                 metadata_key="metadata"    # Field name for metadata
@@ -103,15 +110,46 @@ class StorageService:
             
         except Exception as e:
             logger.error(f"❌ Failed to initialize MongoDB: {e}")
+            logger.error(f"Connection string format: {'mongodb+srv://' if 'mongodb+srv://' in self.mongodb_connection_string else 'Other'}")
+            
+            # Provide specific error guidance
+            error_msg = str(e).lower()
+            if "authentication failed" in error_msg:
+                logger.error("💡 Check your MongoDB username and password")
+            elif "network" in error_msg or "timeout" in error_msg:
+                logger.error("💡 Check your network connection and MongoDB host")
+            elif "ssl" in error_msg or "tls" in error_msg:
+                logger.error("💡 Check SSL/TLS configuration for MongoDB Atlas")
+            
             raise Exception(f"MongoDB initialization failed: {e}")
     
     def _ensure_vector_search_index(self, collection):
         """Ensure vector search index exists on the collection."""
         
         try:
+            # First, ensure the collection exists by inserting a dummy document if needed
+            if collection.count_documents({}) == 0:
+                logger.info("Collection is empty, creating initial document to establish collection...")
+                # Insert a temporary document to create the collection
+                temp_doc = {
+                    "_id": "temp_init_doc",
+                    "text": "Temporary initialization document",
+                    "embedding": [0.0] * 1536,  # Dummy embedding
+                    "metadata": {
+                        "temp": True,
+                        "created_at": datetime.now().isoformat()
+                    }
+                }
+                collection.insert_one(temp_doc)
+                logger.info("Collection created with temporary document")
+            
             # Check if vector search index exists
-            indexes = list(collection.list_search_indexes())
-            vector_index_exists = any(idx.get('name') == 'vector_index' for idx in indexes)
+            try:
+                indexes = list(collection.list_search_indexes())
+                vector_index_exists = any(idx.get('name') == 'vector_index' for idx in indexes)
+            except Exception as list_error:
+                logger.warning(f"Could not list search indexes: {list_error}")
+                vector_index_exists = False
             
             if not vector_index_exists:
                 logger.info("Creating vector search index...")
@@ -120,35 +158,54 @@ class StorageService:
                 index_definition = {
                     "name": "vector_index",
                     "definition": {
-                        "fields": [
-                            {
-                                "type": "vector",
-                                "path": "embedding",
-                                "numDimensions": 1536,  # Adjust based on your embedding model
-                                "similarity": "cosine"
-                            },
-                            {
-                                "type": "filter",
-                                "path": "metadata.document_id"
-                            },
-                            {
-                                "type": "filter", 
-                                "path": "metadata.tlf_type"
-                            },
-                            {
-                                "type": "filter",
-                                "path": "metadata.clinical_domain"
+                        "mappings": {
+                            "dynamic": False,
+                            "fields": {
+                                "embedding": {
+                                    "type": "knnVector",
+                                    "dimensions": 1536,
+                                    "similarity": "cosine"
+                                },
+                                "metadata": {
+                                    "type": "document",
+                                    "fields": {
+                                        "document_id": {
+                                            "type": "token"
+                                        },
+                                        "tlf_type": {
+                                            "type": "token"
+                                        },
+                                        "clinical_domain": {
+                                            "type": "token"
+                                        },
+                                        "page_number": {
+                                            "type": "number"
+                                        },
+                                        "output_number": {
+                                            "type": "token"
+                                        }
+                                    }
+                                },
+                                "text": {
+                                    "type": "string"
+                                }
                             }
-                        ]
+                        }
                     }
                 }
-                
+            
                 # Create the search index
-                collection.create_search_index(index_definition)
-                logger.info("✅ Vector search index created successfully")
-                
-                # Note: Index creation is asynchronous and may take a few minutes to be fully available
-                logger.warning("⚠️  Vector search index is being created. It may take a few minutes to be fully available.")
+                try:
+                    result = collection.create_search_index(index_definition)
+                    logger.info(f"✅ Vector search index created successfully: {result}")
+                    
+                    # Note: Index creation is asynchronous and may take a few minutes to be fully available
+                    logger.warning("⚠️  Vector search index is being created. It may take a few minutes to be fully available.")
+                    
+                except Exception as create_error:
+                    logger.error(f"Failed to create vector search index: {create_error}")
+                    # Try alternative approach for older MongoDB versions
+                    self._create_fallback_index(collection)
                 
             else:
                 logger.info("✅ Vector search index already exists")
@@ -157,13 +214,63 @@ class StorageService:
             logger.warning(f"⚠️  Could not create/check vector search index: {e}")
             logger.warning("You may need to create the vector search index manually in MongoDB Atlas")
 
-    async def create_index(self, document_id: str, nodes: List[BaseNode]) -> str:
-        """Create vector index for document nodes using MongoDB."""
+    def _create_simple_vector_index(self, collection):
+        """Create a simplified vector search index as fallback."""
         
         try:
-            # Create storage context with MongoDB vector store
-            storage_context = StorageContext.from_defaults(vector_store=self._vector_store)
+            logger.info("Trying simplified vector index format...")
             
+            # Simplified index definition
+            simple_index_definition = {
+                "name": "vector_index",
+                "definition": {
+                    "mappings": {
+                        "fields": {
+                            "embedding": {
+                                "type": "knnVector",
+                                "dimensions": 1536,
+                                "similarity": "cosine"
+                            }
+                        }
+                    }
+                }
+            }
+            
+            result = collection.create_search_index(simple_index_definition)
+            logger.info(f"✅ Simplified vector search index created: {result}")
+            
+        except Exception as simple_error:
+            logger.error(f"❌ Even simplified vector index creation failed: {simple_error}")
+            logger.warning("Manual index creation in Atlas UI will be required")
+            
+            # Create basic fallback indexes
+            self._create_fallback_index(collection)
+
+    def _create_fallback_index(self, collection):
+        """Create fallback indexes for older MongoDB versions or when Atlas Search isn't available."""
+        
+        try:
+            logger.info("Creating fallback indexes...")
+            
+            # Create compound index for filtering
+            collection.create_index([
+                ("metadata.document_id", 1),
+                ("metadata.tlf_type", 1),
+                ("metadata.clinical_domain", 1)
+            ])
+            
+            # Create text index for basic text search
+            collection.create_index([("text", "text")])
+            
+            logger.info("✅ Fallback indexes created")
+            
+        except Exception as fallback_error:
+            logger.warning(f"⚠️  Could not create fallback indexes: {fallback_error}")
+
+    async def create_index(self, document_id: str, nodes: List[BaseNode]) -> str:
+        """Create vector index for document nodes using MongoDB with better error handling."""
+        
+        try:
             # Add document_id to all node metadata for filtering
             for node in nodes:
                 if not hasattr(node, 'metadata'):
@@ -171,9 +278,51 @@ class StorageService:
                 node.metadata['document_id'] = document_id
                 node.metadata['created_at'] = datetime.now().isoformat()
             
-            # Create vector index
             logger.info(f"Creating vector index for document {document_id} with {len(nodes)} nodes")
-            vector_index = VectorStoreIndex(nodes, storage_context=storage_context)
+            
+            # FIX: Create storage context more carefully
+            try:
+                # Method 1: Try with explicit vector store
+                from llama_index.core import StorageContext
+                storage_context = StorageContext.from_defaults(vector_store=self._vector_store)
+                
+                logger.info("✅ Created storage context successfully")
+                
+            except Exception as storage_error:
+                logger.error(f"❌ Storage context creation failed: {storage_error}")
+                
+                # Method 2: Fallback - create vector store with fresh MongoDB client
+                logger.info("🔄 Trying fallback MongoDB vector store creation...")
+                
+                from llama_index.vector_stores.mongodb import MongoDBAtlasVectorSearch
+                from llama_index.core import StorageContext
+                
+                # Create a fresh vector store instance
+                fallback_vector_store = MongoDBAtlasVectorSearch(
+                    mongodb_client=self._mongo_client,
+                    database_name=self.database_name,
+                    collection_name=self.collection_name,
+                    vector_index_name="vector_index",
+                    embedding_key="embedding",
+                    text_key="text",
+                    metadata_key="metadata"
+                )
+                
+                storage_context = StorageContext.from_defaults(vector_store=fallback_vector_store)
+                logger.info("✅ Created fallback storage context")
+            
+            # Create vector index with error handling
+            try:
+                logger.info("🚀 Creating VectorStoreIndex...")
+                vector_index = VectorStoreIndex(nodes, storage_context=storage_context)
+                logger.info("✅ VectorStoreIndex created successfully")
+                
+            except Exception as index_error:
+                logger.error(f"❌ VectorStoreIndex creation failed: {index_error}")
+                
+                # Method 3: Manual vector storage fallback
+                logger.info("🔄 Trying manual vector storage...")
+                return await self._manual_vector_storage(document_id, nodes)
             
             # Cache the index
             self._index_cache[document_id] = vector_index
@@ -186,7 +335,7 @@ class StorageService:
                 "storage_type": "mongodb_atlas"
             }
             
-            # Optionally persist metadata to MongoDB as well
+            # Persist metadata to MongoDB
             await self._store_document_metadata(document_id, self._metadata[document_id])
             
             logger.info(f"✅ Created MongoDB vector index for document {document_id} with {len(nodes)} nodes")
@@ -195,6 +344,109 @@ class StorageService:
             
         except Exception as e:
             logger.error(f"❌ Error creating MongoDB index for document {document_id}: {e}")
+            logger.exception("Full error details:")
+            
+            # Try manual fallback
+            logger.info("🔄 Attempting manual vector storage as final fallback...")
+            try:
+                return await self._manual_vector_storage(document_id, nodes)
+            except Exception as fallback_error:
+                logger.error(f"❌ Manual fallback also failed: {fallback_error}")
+                raise e
+
+    async def _manual_vector_storage(self, document_id: str, nodes: List[BaseNode]) -> str:
+        """Manual vector storage fallback method."""
+        
+        try:
+            logger.info(f"📝 Manual vector storage for {len(nodes)} nodes...")
+            
+            # Get embedding model from Settings
+            from llama_index.core import Settings
+            
+            if not Settings.embed_model:
+                raise Exception("No embedding model available")
+            
+            embed_model = Settings.embed_model
+            logger.info(f"🔤 Using embedding model: {embed_model.__class__.__name__}")
+            
+            # Get database and collection directly
+            database = self._mongo_client[self.database_name]
+            collection = database[self.collection_name]
+            
+            # Process nodes in batches
+            batch_size = 10
+            total_stored = 0
+            
+            for i in range(0, len(nodes), batch_size):
+                batch = nodes[i:i + batch_size]
+                batch_docs = []
+                
+                logger.info(f"📊 Processing batch {i//batch_size + 1}/{(len(nodes)-1)//batch_size + 1}")
+                
+                for node in batch:
+                    try:
+                        # Generate embedding for the node
+                        text = node.get_content()
+                        embedding = await embed_model.aget_text_embedding(text)
+                        
+                        # Create document for MongoDB
+                        doc = {
+                            "_id": f"{document_id}_{node.node_id}",
+                            "text": text,
+                            "embedding": embedding,
+                            "metadata": node.metadata,
+                            "node_id": node.node_id,
+                            "document_id": document_id,
+                            "created_at": datetime.now()
+                        }
+                        
+                        batch_docs.append(doc)
+                        
+                    except Exception as node_error:
+                        logger.warning(f"⚠️  Failed to process node {node.node_id}: {node_error}")
+                        continue
+                
+                # Insert batch into MongoDB
+                if batch_docs:
+                    try:
+                        result = collection.insert_many(batch_docs, ordered=False)
+                        inserted_count = len(result.inserted_ids)
+                        total_stored += inserted_count
+                        logger.info(f"✅ Stored {inserted_count} vectors from batch")
+                        
+                    except Exception as batch_error:
+                        logger.error(f"❌ Failed to store batch: {batch_error}")
+                        # Try individual inserts
+                        for doc in batch_docs:
+                            try:
+                                collection.insert_one(doc)
+                                total_stored += 1
+                            except Exception as doc_error:
+                                logger.warning(f"⚠️  Failed to store individual document: {doc_error}")
+            
+            logger.info(f"✅ Manual vector storage completed: {total_stored}/{len(nodes)} nodes stored")
+            
+            # Create a simple index representation for caching
+            # This won't have all VectorStoreIndex functionality but allows basic operations
+            self._index_cache[document_id] = "manual_storage"
+            
+            # Store metadata
+            self._metadata[document_id] = {
+                "created_at": datetime.now(),
+                "node_count": total_stored,
+                "document_id": document_id,
+                "storage_type": "mongodb_manual"
+            }
+            
+            await self._store_document_metadata(document_id, self._metadata[document_id])
+            
+            if total_stored < len(nodes):
+                logger.warning(f"⚠️  Only {total_stored}/{len(nodes)} nodes stored successfully")
+            
+            return document_id
+            
+        except Exception as manual_error:
+            logger.error(f"❌ Manual vector storage failed: {manual_error}")
             raise
 
     async def link_index(self, new_document_id: str, existing_document_id: str) -> bool:
@@ -234,15 +486,32 @@ class StorageService:
         
         try:
             # Check cache first
-            if document_id in self._index_cache:
-                return self._index_cache[document_id]
+            cached_index = self._index_cache.get(document_id)
+            
+            if cached_index == "manual_storage":
+                # For manual storage, create a basic index that can query the collection
+                logger.info(f"📊 Creating query interface for manually stored document {document_id}")
+                
+                # Create a basic vector store interface
+                storage_context = StorageContext.from_defaults(vector_store=self._vector_store)
+                
+                # Create empty index that can query existing data
+                vector_index = VectorStoreIndex([], storage_context=storage_context)
+                
+                # Cache for future use
+                self._index_cache[document_id] = vector_index
+                return vector_index
+                
+            elif isinstance(cached_index, VectorStoreIndex):
+                return cached_index
             
             # Check if this is a linked document
             original_doc_id = document_id
             if document_id in self._index_links:
                 original_doc_id = self._index_links[document_id]
-                if original_doc_id in self._index_cache:
-                    return self._index_cache[original_doc_id]
+                cached_original = self._index_cache.get(original_doc_id)
+                if cached_original:
+                    return cached_original
             
             # Check if document has data in MongoDB
             metadata = await self._get_document_metadata(original_doc_id)
