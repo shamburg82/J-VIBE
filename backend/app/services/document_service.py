@@ -12,7 +12,7 @@ from pathlib import Path
 import logging
 from fastapi import UploadFile
 
-from llama_index.core import SimpleDirectoryReader
+from llama_index.core import SimpleDirectoryReader, Settings
 from llama_index.core.node_parser import TokenTextSplitter
 from llama_index.core.ingestion import IngestionPipeline
 from llama_index.core.extractors import QuestionsAnsweredExtractor, SummaryExtractor, KeywordExtractor
@@ -35,6 +35,8 @@ class DocumentService:
         if config is None:
             from ..core.config import get_config
             config = get_config()
+        
+        self.config = config
         
         self.base_storage_path = getattr(config, 'base_storage_path', Path("//datastore/BU/RD/Restricted/DS/JazzVIBE/source_docs/study"))
         
@@ -304,20 +306,22 @@ class DocumentService:
             document_id, ProcessingStatusEnum.BUILDING_INDEX, 85,
             f"Storing {len(doc_nodes)} nodes in MongoDB Atlas vector store..."
         )
-        
+    
         # Store in MongoDB vector index
         try:
             await self.storage_service.create_index(document_id, doc_nodes)
             logger.info(f"✅ Successfully stored {len(doc_nodes)} nodes in MongoDB for document {document_id}")
         except Exception as mongo_error:
             logger.error(f"❌ MongoDB storage failed: {mongo_error}")
-            # Could fallback to in-memory storage here if desired
             raise
+        
+        # Complete the status update after successful storage
+        logger.info(f"🔄 Finalizing document processing for {document_id}...")
         
         # Count TLF outputs found
         tlf_outputs = await self._count_tlf_outputs(doc_nodes)
         
-        # Update document info
+        # Update document info with final results
         doc_info.status = ProcessingStatusEnum.COMPLETED
         doc_info.processed_at = datetime.now()
         doc_info.total_chunks = len(doc_nodes)
@@ -325,6 +329,7 @@ class DocumentService:
         doc_info.tlf_types_distribution = tlf_outputs["types"]
         doc_info.clinical_domains_distribution = tlf_outputs["domains"]
         
+        # Update the final status to COMPLETED
         await self._update_status(
             document_id, ProcessingStatusEnum.COMPLETED, 100,
             f"Processing complete! Stored {len(doc_nodes)} chunks in MongoDB. Found {tlf_outputs['total']} TLF outputs.",
@@ -336,7 +341,9 @@ class DocumentService:
         # Update manifest
         self._add_to_manifest(document_id, doc_info)
         
-        logger.info(f"✅ Successfully processed document {document_id} with MongoDB vector store")
+        logger.info(f"✅ Document {document_id} processing completed successfully!")
+        logger.info(f"   📊 Final stats: {len(doc_nodes)} chunks, {tlf_outputs['total']} TLF outputs, {total_pages} pages")
+
 
     async def _apply_additional_extractors(self, doc_nodes: List, document_id: str):
         """Apply additional extractors (keyword, question) with progress updates."""
