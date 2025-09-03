@@ -70,7 +70,8 @@ class PositConfig(Config):
         self.aws_secret_access_key = os.getenv("AWS_SECRET_ACCESS_KEY")
         
         # Bedrock settings
-        self.llm_model_id = os.getenv("LLM_MODEL_ID", "arn:aws:bedrock:us-west-2:912115013020:inference-profile/us.anthropic.claude-3-7-sonnet-20250219-v1:0")
+        self.llm_model_arn = os.getenv("LLM_MODEL_ARN", "arn:aws:bedrock:us-west-2:912115013020:inference-profile/us.anthropic.claude-3-7-sonnet-20250219-v1:0")
+        self.llm_model_id  = os.getenv("LLM_MODEL_ID", "anthropic.claude-3-7-sonnet-20250219-v1:0")
         self.embedding_model_id = os.getenv("EMBEDDING_MODEL_ID", "amazon.titan-embed-text-v1")
         self.temperature = float(os.getenv("TEMPERATURE", "0.2"))
         self.max_tokens = int(os.getenv("MAX_TOKENS", "4096"))
