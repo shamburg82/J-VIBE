@@ -248,22 +248,45 @@ class DocumentService:
                 
                 for chunk_idx, chunk_text in enumerate(text_chunks):
                     if chunk_text.strip():
+                        # CRITICAL FIX: Set document_id explicitly in metadata from the start
+                        metadata = {
+                            "document_id": document_id,  # EXPLICIT assignment - NOT None!
+                            "page_number": doc.metadata.get("page_label", doc_idx + 1),
+                            "source": doc.metadata.get("file_name", stored_file_path.name),
+                            "doc_idx": doc_idx,
+                            "chunk_idx": chunk_idx,
+                            "storage_type": "mongodb",
+                            "created_at": datetime.now().isoformat()
+                        }
+                        
+                        # VERIFICATION: Ensure document_id is actually set
+                        if metadata["document_id"] != document_id:
+                            logger.error(f"❌ CRITICAL: document_id mismatch! Expected '{document_id}', got '{metadata['document_id']}'")
+                            raise ValueError(f"document_id assignment failed")
+                        
                         node = TextNode(
                             text=chunk_text,
                             id_=f"{document_id}_doc{doc_idx}_chunk{chunk_idx}",
-                            metadata={
-                                "document_id": document_id,
-                                "page_number": doc.metadata.get("page_label", doc_idx + 1),
-                                "source": doc.metadata.get("file_name", stored_file_path.name),
-                                "doc_idx": doc_idx,
-                                "chunk_idx": chunk_idx,
-                                "storage_type": "mongodb",
-                                "created_at": datetime.now().isoformat()
-                            }
+                            metadata=metadata
                         )
+                        
+                        # DOUBLE CHECK: Verify the node has correct document_id
+                        if node.metadata.get("document_id") != document_id:
+                            logger.error(f"❌ CRITICAL: Node metadata document_id is wrong!")
+                            logger.error(f"   Expected: '{document_id}'")
+                            logger.error(f"   Got: '{node.metadata.get('document_id')}'")
+                            raise ValueError("Node document_id verification failed")
+                        
                         initial_nodes.append(node)
             
-            logger.info(f"Created {len(initial_nodes)} initial nodes for MongoDB storage")
+            logger.info(f"✅ Created {len(initial_nodes)} initial nodes with document_id: '{document_id}'")
+            
+            # VERIFICATION: Check a few sample nodes
+            for i, node in enumerate(initial_nodes[:3]):
+                logger.info(f"   Node {i} verification:")
+                logger.info(f"     _id: {node.id_}")
+                logger.info(f"     metadata.document_id: '{node.metadata.get('document_id')}'")
+                logger.info(f"     metadata keys: {list(node.metadata.keys())}")
             
             if not initial_nodes:
                 raise ValueError("No text chunks created")
@@ -272,35 +295,56 @@ class DocumentService:
                 document_id, ProcessingStatusEnum.EXTRACTING_TLF_METADATA, 50,
                 f"Extracting TLF metadata from {len(initial_nodes)} chunks..."
             )
-        
-            # Apply extractors (same as before but with MongoDB awareness)
-            logger.info("Running extraction pipeline for MongoDB...")
+
+            # Apply TLF extraction - CRITICAL: This might be overwriting document_id!
+            logger.info("🔧 Running TLF extraction...")
+            logger.info(f"   Before TLF extraction - sample document_id: '{initial_nodes[0].metadata.get('document_id')}'")
             
-            # Apply TLF extraction first (most important)
-            doc_nodes = self.tlf_extractor(initial_nodes)
-            logger.info(f"TLF extraction complete, {len(doc_nodes)} nodes ready for MongoDB")
+            # APPLY EXTRACTION WITH EXPLICIT DOCUMENT_ID PRESERVATION
+            doc_nodes = self._apply_tlf_extraction_with_document_id_preservation(initial_nodes, document_id)
             
-            # Then apply other extractors if enabled
-            await self._apply_additional_extractors(doc_nodes, document_id)
+            logger.info(f"   After TLF extraction - sample document_id: '{doc_nodes[0].metadata.get('document_id')}'")
             
-            # Verify we have nodes
-            if not doc_nodes:
-                raise ValueError("No nodes after extraction")
+            # FINAL VERIFICATION: Ensure ALL nodes have correct document_id
+            nodes_with_wrong_id = []
+            for i, node in enumerate(doc_nodes):
+                if node.metadata.get("document_id") != document_id:
+                    nodes_with_wrong_id.append(i)
             
-            # Log MongoDB-specific information
-            mongodb_metadata_count = sum(1 for node in doc_nodes if node.metadata.get("storage_type") == "mongodb")
-            logger.info(f"Prepared {mongodb_metadata_count} nodes with MongoDB metadata")
+            if nodes_with_wrong_id:
+                logger.error(f"❌ CRITICAL: {len(nodes_with_wrong_id)} nodes have wrong document_id!")
+                logger.error(f"   First few wrong nodes: {nodes_with_wrong_id[:5]}")
+                
+                # LOG THE ACTUAL VALUES FOR DEBUGGING
+                for i in nodes_with_wrong_id[:3]:
+                    node = doc_nodes[i]
+                    logger.error(f"   Node {i}: document_id = '{node.metadata.get('document_id')}' (should be '{document_id}')")
+                
+                # ATTEMPT TO FIX THE WRONG NODES
+                logger.info("🔧 Attempting to fix nodes with wrong document_id...")
+                
+                fixed_count = 0
+                for i in nodes_with_wrong_id:
+                    doc_nodes[i].metadata["document_id"] = document_id
+                    fixed_count += 1
+                
+                logger.info(f"✅ Fixed document_id in {fixed_count} nodes")
             
+            # FINAL CHECK
+            final_check_sample = [node.metadata.get("document_id") for node in doc_nodes[:5]]
+            logger.info(f"📊 Final document_id check (first 5 nodes): {final_check_sample}")
+            
+            all_correct = all(node.metadata.get("document_id") == document_id for node in doc_nodes)
+            if not all_correct:
+                raise ValueError("Some nodes still have incorrect document_id after fixing!")
+            
+            logger.info(f"✅ All {len(doc_nodes)} nodes have correct document_id: '{document_id}'")
+
         except Exception as processing_error:
             logger.error(f"Processing error: {processing_error}")
             logger.exception("Full processing error:")
-            
-            # Fallback: Create basic nodes with TLF extraction only
-            logger.info("Falling back to basic TLF extraction for MongoDB")
-            doc_nodes = await self._create_fallback_nodes(documents, document_id, stored_file_path)
-        
-        if not doc_nodes:
-            raise ValueError("No nodes created from document")
+            raise
+
         
         await self._update_status(
             document_id, ProcessingStatusEnum.BUILDING_INDEX, 85,
@@ -314,9 +358,6 @@ class DocumentService:
         except Exception as mongo_error:
             logger.error(f"❌ MongoDB storage failed: {mongo_error}")
             raise
-        
-        # Complete the status update after successful storage
-        logger.info(f"🔄 Finalizing document processing for {document_id}...")
         
         # Count TLF outputs found
         tlf_outputs = await self._count_tlf_outputs(doc_nodes)
@@ -345,82 +386,96 @@ class DocumentService:
         logger.info(f"   📊 Final stats: {len(doc_nodes)} chunks, {tlf_outputs['total']} TLF outputs, {total_pages} pages")
 
 
+    async def _apply_tlf_extraction_with_document_id_preservation(self, nodes: List, document_id: str) -> List:
+        """Apply TLF extraction while preserving document_id."""
+        
+        logger.info(f"🔧 Applying TLF extraction with document_id preservation for {document_id}")
+        
+        # BEFORE extraction - verify document_id
+        before_sample = [node.metadata.get("document_id") for node in nodes[:3]]
+        logger.info(f"   Before extraction - sample document_ids: {before_sample}")
+        
+        try:
+            # Apply TLF extraction
+            extracted_nodes = self.tlf_extractor(nodes)
+            
+            # AFTER extraction - check if document_id was preserved
+            after_sample = [node.metadata.get("document_id") for node in extracted_nodes[:3]]
+            logger.info(f"   After extraction - sample document_ids: {after_sample}")
+            
+            # CRITICAL FIX: If TLF extractor overwrote document_id, restore it
+            nodes_fixed = 0
+            for node in extracted_nodes:
+                if node.metadata.get("document_id") != document_id:
+                    logger.warning(f"   TLF extractor overwrote document_id: '{node.metadata.get('document_id')}' -> '{document_id}'")
+                    node.metadata["document_id"] = document_id
+                    nodes_fixed += 1
+            
+            if nodes_fixed > 0:
+                logger.info(f"✅ Fixed document_id in {nodes_fixed} nodes after TLF extraction")
+            
+            # Apply other extractors if enabled (with same protection)
+            if self.enable_keyword_extraction and self.llm:
+                logger.info("   Applying keyword extraction...")
+                await self._apply_additional_extractors(extracted_nodes, document_id)
+            
+            # FINAL verification
+            final_sample = [node.metadata.get("document_id") for node in extracted_nodes[:3]]
+            logger.info(f"   Final verification - sample document_ids: {final_sample}")
+            
+            return extracted_nodes
+            
+        except Exception as extraction_error:
+            logger.error(f"❌ TLF extraction failed: {extraction_error}")
+            
+            # FALLBACK: Return original nodes with verified document_id
+            logger.info("   Using fallback - returning original nodes with verified document_id")
+            
+            for node in nodes:
+                node.metadata["document_id"] = document_id
+            
+            return nodes
+
+
     async def _apply_additional_extractors(self, doc_nodes: List, document_id: str):
         """Apply additional extractors (keyword, question) with progress updates."""
         
         try:
-            from llama_index.core.extractors import KeywordExtractor, QuestionsAnsweredExtractor
-            
-            # Apply keyword extraction in batches
-            if self.llm and getattr(self, 'enable_keyword_extraction', True):
-                await self._update_status(
-                    document_id, ProcessingStatusEnum.EXTRACTING_TLF_METADATA, 60,
-                    "Extracting keywords..."
-                )
+            if self.enable_keyword_extraction and self.llm:
+                logger.info("   Applying keyword extraction with document_id protection...")
                 
+                from llama_index.core.extractors import KeywordExtractor
                 keyword_extractor = KeywordExtractor(keywords=10, llm=self.llm)
                 
-                # Process in smaller batches to show progress
-                batch_size = 10
+                # Process in small batches
+                batch_size = 5
                 for i in range(0, len(doc_nodes), batch_size):
                     batch = doc_nodes[i:i+batch_size]
-                    progress = 60 + int((i / len(doc_nodes)) * 10)  # 60-70% for keywords
                     
-                    await self._update_status(
-                        document_id, ProcessingStatusEnum.EXTRACTING_TLF_METADATA, progress,
-                        f"Extracting keywords: {i+1}-{min(i+batch_size, len(doc_nodes))}/{len(doc_nodes)}..."
-                    )
+                    # Store original document_ids
+                    original_doc_ids = [node.metadata.get("document_id") for node in batch]
                     
-                    # Apply keyword extraction to batch
                     try:
-                        # Keyword extractor modifies nodes in place
+                        # Apply extraction
                         keyword_extractor(batch)
-                    except Exception as ke:
-                        logger.warning(f"Keyword extraction failed for batch: {ke}")
+                        
+                        # Restore document_id if it was overwritten
+                        for j, node in enumerate(batch):
+                            if node.metadata.get("document_id") != original_doc_ids[j]:
+                                logger.warning(f"     Keyword extractor overwrote document_id, restoring...")
+                                node.metadata["document_id"] = original_doc_ids[j]
+                    
+                    except Exception as batch_error:
+                        logger.warning(f"     Keyword extraction failed for batch: {batch_error}")
+                        
+                        # Ensure document_id is still correct
+                        for j, node in enumerate(batch):
+                            node.metadata["document_id"] = original_doc_ids[j]
                 
-                logger.info("Keyword extraction complete")
+                logger.info("   ✅ Keyword extraction completed with document_id protection")
             
-            # Apply question extraction if enabled
-            if self.llm and getattr(self, 'enable_question_extraction', True):
-                await self._update_status(
-                    document_id, ProcessingStatusEnum.EXTRACTING_TLF_METADATA, 70,
-                    "Generating questions..."
-                )
-                
-                question_extractor = QuestionsAnsweredExtractor(
-                    questions=3,
-                    llm=self.llm,
-                    prompt_template="""
-                    Given the following clinical trial text, generate {num_questions} questions 
-                    that this text can answer. Focus on clinical, statistical, and regulatory aspects.
-                    
-                    Text: {context_str}
-                    
-                    Questions:
-                    """
-                )
-                
-                # Process in smaller batches
-                batch_size = 5  # Smaller batches for question generation (more expensive)
-                for i in range(0, len(doc_nodes), batch_size):
-                    batch = doc_nodes[i:i+batch_size]
-                    progress = 70 + int((i / len(doc_nodes)) * 10)  # 70-80% for questions
-                    
-                    await self._update_status(
-                        document_id, ProcessingStatusEnum.EXTRACTING_TLF_METADATA, progress,
-                        f"Generating questions: {i+1}-{min(i+batch_size, len(doc_nodes))}/{len(doc_nodes)}..."
-                    )
-                    
-                    try:
-                        # Question extractor modifies nodes in place
-                        question_extractor(batch)
-                    except Exception as qe:
-                        logger.warning(f"Question extraction failed for batch: {qe}")
-                
-                logger.info("Question extraction complete")
-            
-        except Exception as extractor_error:
-            logger.warning(f"Additional extractors failed: {extractor_error}, continuing with TLF metadata only")
+        except Exception as e:
+            logger.warning(f"Additional extractors failed: {e}, continuing with basic TLF metadata")
 
     async def _create_fallback_nodes(self, documents: List, document_id: str, stored_file_path: Path) -> List:
         """Create fallback nodes when full processing fails."""
