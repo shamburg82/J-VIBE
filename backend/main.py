@@ -1,7 +1,163 @@
 # backend/main.py
+import sys
 import os
 import subprocess
 import logging
+import importlib.util
+import asyncio
+from concurrent.futures import ThreadPoolExecutor
+import time
+import threading
+from functools import partial
+import atexit
+
+# Configure logging for Connect with explicit stdout
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
+    handlers=[
+        logging.StreamHandler(sys.stdout),
+        logging.StreamHandler(sys.stderr)
+    ],
+    force=True
+)
+logger = logging.getLogger(__name__)
+
+# Global state for initialization
+INITIALIZATION_LOCK = threading.Lock()
+INITIALIZATION_THREAD = None
+INITIALIZATION_COMPLETE = False
+INITIALIZATION_ERROR = None
+INITIALIZATION_STATUS = "pending"
+INITIALIZATION_PROGRESS = {}
+INITIALIZATION_STARTED = False
+
+# Global state for runtime installer
+RUNTIME_INSTALLATION_COMPLETE = False
+RUNTIME_INSTALLATION_ERROR = None
+RUNTIME_INSTALLATION_STATUS = "pending"
+
+def check_package_availability():
+    """Check if required packages are available."""
+    packages_status = {}
+    
+    try:
+        import aiobotocore
+        import boto3
+        packages_status["aiobotocore"] = {"available": True, "version": getattr(aiobotocore, '__version__', 'unknown')}
+        packages_status["boto3"] = {"available": True, "version": getattr(boto3, '__version__', 'unknown')}
+    except ImportError as e:
+        packages_status["aiobotocore"] = {"available": False, "error": str(e)}
+        packages_status["boto3"] = {"available": False, "error": str(e)}
+    
+    try:
+        import llama_index.llms.bedrock_converse
+        packages_status["bedrock_converse"] = {"available": True, "version": "installed"}
+    except ImportError as e:
+        packages_status["bedrock_converse"] = {"available": False, "error": str(e)}
+    
+    try:
+        import aioboto3
+        packages_status["aioboto3"] = {"available": True, "version": getattr(aioboto3, '__version__', 'unknown')}
+    except ImportError as e:
+        packages_status["aioboto3"] = {"available": False, "error": str(e)}
+    
+    return packages_status
+
+def install_package_with_no_deps(package_spec, timeout=120):
+    """Install a package with --no-deps option."""
+    cmd = [sys.executable, "-m", "pip", "install", "--no-cache-dir", "--no-deps", package_spec]
+    
+    logger.info(f"Installing {package_spec} with --no-deps")
+    
+    try:
+        result = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout)
+        
+        if result.returncode == 0:
+            logger.info(f"✅ Successfully installed {package_spec}")
+            return True
+        else:
+            logger.error(f"❌ Failed to install {package_spec}: {result.stderr}")
+            return False
+            
+    except subprocess.TimeoutExpired:
+        logger.error(f"❌ Installation of {package_spec} timed out after {timeout}s")
+        return False
+    except Exception as e:
+        logger.error(f"❌ Exception during installation of {package_spec}: {e}")
+        return False
+
+def runtime_package_installer():
+    """Install required packages with --no-deps at runtime."""
+    global RUNTIME_INSTALLATION_COMPLETE, RUNTIME_INSTALLATION_ERROR, RUNTIME_INSTALLATION_STATUS
+    
+    try:
+        RUNTIME_INSTALLATION_STATUS = "running"
+        logger.info("🔧 Starting runtime package installation...")
+        
+        packages_status = check_package_availability()
+        logger.info(f"Package status: {packages_status}")
+        
+        required_packages = ["aiobotocore", "bedrock_converse", "aioboto3"]
+        missing_packages = [pkg for pkg in required_packages if not packages_status.get(pkg, {}).get("available", False)]
+        
+        if not missing_packages:
+            logger.info("✅ All required packages are already available!")
+            RUNTIME_INSTALLATION_COMPLETE = True
+            RUNTIME_INSTALLATION_STATUS = "complete"
+            return True
+        
+        logger.info(f"Installing missing packages: {missing_packages}")
+        
+        success = True
+        
+        if "bedrock_converse" in missing_packages:
+            if not install_package_with_no_deps("llama-index-llms-bedrock-converse==0.6.0"):
+                success = False
+        
+        if "aioboto3" in missing_packages:
+            if not install_package_with_no_deps("aioboto3==13.4.0"):
+                success = False
+        
+        if success:
+            logger.info("🔍 Verifying installations...")
+            final_status = check_package_availability()
+            
+            still_missing = [pkg for pkg in required_packages if not final_status.get(pkg, {}).get("available", False)]
+            
+            if not still_missing:
+                logger.info("✅ All packages installed and verified successfully!")
+                RUNTIME_INSTALLATION_COMPLETE = True
+                RUNTIME_INSTALLATION_STATUS = "complete"
+                return True
+            else:
+                error_msg = f"Installation appeared successful but imports still fail for: {still_missing}"
+                logger.error(f"❌ {error_msg}")
+                RUNTIME_INSTALLATION_ERROR = error_msg
+                RUNTIME_INSTALLATION_STATUS = "failed"
+                return False
+        else:
+            error_msg = "Package installation failed"
+            logger.error(f"❌ {error_msg}")
+            RUNTIME_INSTALLATION_ERROR = error_msg
+            RUNTIME_INSTALLATION_STATUS = "failed"
+            return False
+            
+    except Exception as e:
+        error_msg = f"Runtime package installation failed: {str(e)}"
+        logger.error(f"❌ {error_msg}")
+        RUNTIME_INSTALLATION_ERROR = error_msg
+        RUNTIME_INSTALLATION_STATUS = "failed"
+        return False
+
+# Start runtime installation immediately
+logger.info("🚀 Starting runtime package installation in background...")
+executor = ThreadPoolExecutor(max_workers=2)
+runtime_install_future = executor.submit(runtime_package_installer)
+
+
+
+# Continue with regular imports
 import re
 from pathlib import Path
 from datetime import datetime
