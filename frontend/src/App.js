@@ -85,6 +85,7 @@ function detectEnvironment() {
   // Check if we're in Posit Connect (production)
   const isConnect = Boolean(
     window.location.pathname.includes('/connect/') ||
+    window.location.pathname.includes('/content/') ||
     window.__POSIT_CONNECT__
   );
   
