@@ -29,19 +29,62 @@ const getBaseURL = () => {
   } else {
     // Fallback: client-side detection
     const pathname = window.location.pathname;
+    const hostname = window.location.hostname;
     console.log('API Service: Client-side detection from pathname:', pathname);
+    console.log('API Service: Hostname:', hostname);
     
-    // Posit Workbench pattern: /s/{session}/p/{port}/
-    const workbenchMatch = pathname.match(/^(\/s\/[^\/]+\/p\/[^\/]+)/);
-    if (workbenchMatch) {
-      basePath = workbenchMatch[1];
-      console.log('API Service: Client detected Workbench base path:', basePath);
-    } else {
-      // Posit Connect pattern: /connect/...
+    // Enhanced Connect detection patterns
+    
+    // Pattern 1: Content URLs - /content/{guid}
+    const contentMatch = pathname.match(/^(\/content\/[^\/]+)/);
+    if (contentMatch) {
+      basePath = contentMatch[1];
+      console.log('API Service: Detected Connect content path:', basePath);
+    }
+    
+    // Pattern 2: Connect apps URLs - /connect/#/apps/{guid}
+    else if (pathname.includes('/connect/#/apps/')) {
+      const connectAppsMatch = pathname.match(/^(\/connect\/#\/apps\/[^\/]+)/);
+      if (connectAppsMatch) {
+        basePath = connectAppsMatch[1];
+        console.log('API Service: Detected Connect apps path:', basePath);
+      }
+    }
+    
+    // Pattern 3: Connect general - /connect/{anything}
+    else if (pathname.startsWith('/connect/')) {
       const connectMatch = pathname.match(/^(\/connect\/[^\/]*)/);
       if (connectMatch) {
         basePath = connectMatch[1];
-        console.log('API Service: Client detected Connect base path:', basePath);
+        console.log('API Service: Detected Connect general path:', basePath);
+      }
+    }
+    
+    // Pattern 4: Vanity URLs - single path segment (not root, not multi-segment)
+    else if (hostname.includes('jazzpharma.com') || hostname.includes('rstudio') || hostname.includes('connect')) {
+      // For Jazz Pharma Connect or other Connect instances
+      const pathSegments = pathname.split('/').filter(segment => segment.length > 0);
+      
+      // If we have exactly one path segment and it's not obviously a file or API route
+      if (pathSegments.length === 1 && 
+          !pathSegments[0].includes('.') && 
+          !pathSegments[0].startsWith('api') &&
+          !pathSegments[0].startsWith('static')) {
+        basePath = '/' + pathSegments[0];
+        console.log('API Service: Detected Connect vanity URL path:', basePath);
+      }
+      // If we're at root but hostname suggests Connect, check for redirect patterns
+      else if (pathSegments.length === 0 && (hostname.includes('connect') || hostname.includes('jazzpharma'))) {
+        console.log('API Service: Connect hostname detected but at root - may need manual configuration');
+      }
+    }
+    
+    // Pattern 5: Posit Workbench pattern (for completeness)
+    else {
+      const workbenchMatch = pathname.match(/^(\/s\/[^\/]+\/p\/[^\/]+)/);
+      if (workbenchMatch) {
+        basePath = workbenchMatch[1];
+        console.log('API Service: Detected Workbench base path:', basePath);
       }
     }
   }
@@ -85,15 +128,36 @@ const getEventSourceBaseURL = () => {
       }
     }
   } else {
-    // Fallback detection
+    // Enhanced fallback detection matching the main detection logic
     const pathname = window.location.pathname;
-    const workbenchMatch = pathname.match(/^(\/s\/[^\/]+\/p\/[^\/]+)/);
-    if (workbenchMatch) {
-      basePath = workbenchMatch[1];
-    } else {
+    const hostname = window.location.hostname;
+    
+    // Same patterns as getBaseURL
+    const contentMatch = pathname.match(/^(\/content\/[^\/]+)/);
+    if (contentMatch) {
+      basePath = contentMatch[1];
+    } else if (pathname.includes('/connect/#/apps/')) {
+      const connectAppsMatch = pathname.match(/^(\/connect\/#\/apps\/[^\/]+)/);
+      if (connectAppsMatch) {
+        basePath = connectAppsMatch[1];
+      }
+    } else if (pathname.startsWith('/connect/')) {
       const connectMatch = pathname.match(/^(\/connect\/[^\/]*)/);
       if (connectMatch) {
         basePath = connectMatch[1];
+      }
+    } else if (hostname.includes('jazzpharma.com') || hostname.includes('rstudio') || hostname.includes('connect')) {
+      const pathSegments = pathname.split('/').filter(segment => segment.length > 0);
+      if (pathSegments.length === 1 && 
+          !pathSegments[0].includes('.') && 
+          !pathSegments[0].startsWith('api') &&
+          !pathSegments[0].startsWith('static')) {
+        basePath = '/' + pathSegments[0];
+      }
+    } else {
+      const workbenchMatch = pathname.match(/^(\/s\/[^\/]+\/p\/[^\/]+)/);
+      if (workbenchMatch) {
+        basePath = workbenchMatch[1];
       }
     }
   }
@@ -160,8 +224,62 @@ api.interceptors.response.use(
 export const apiService = {
   // Health check
   async checkHealth() {
-    const response = await api.get('/health');
-    return response.data;
+    try {
+      const response = await api.get('/health');
+      return response.data;
+    } catch (error) {
+      console.error('Health check failed:', error);
+      
+      // Try the root health endpoint as fallback
+      try {
+        const basePath = getEventSourceBaseURL();
+        const fallbackUrl = `${basePath}/health`;
+        console.log('Trying fallback health endpoint:', fallbackUrl);
+        
+        const fallbackResponse = await fetch(fallbackUrl);
+        if (fallbackResponse.ok) {
+          const data = await fallbackResponse.json();
+          return data;
+        }
+      } catch (fallbackError) {
+        console.error('Fallback health check also failed:', fallbackError);
+      }
+      
+      throw error;
+    }
+  },
+
+  // Debug endpoint to help with path detection issues
+  async getPathDebugInfo() {
+    try {
+      const basePath = getEventSourceBaseURL();
+      const debugUrl = `${basePath}/debug/path-info`;
+      console.log('Fetching path debug info from:', debugUrl);
+      
+      const response = await fetch(debugUrl);
+      if (response.ok) {
+        const data = await response.json();
+        return data;
+      } else {
+        throw new Error(`Debug endpoint returned ${response.status}`);
+      }
+    } catch (error) {
+      console.error('Path debug info failed:', error);
+      
+      // Return client-side analysis if server debug fails
+      return {
+        client_side_analysis: {
+          current_url: window.location.href,
+          pathname: window.location.pathname,
+          hostname: window.location.hostname,
+          detected_base_path: getEventSourceBaseURL(),
+          api_base_url: getBaseURL(),
+          server_provided_path: window.__POSIT_BASE_PATH__ || 'not_provided',
+          environment_type: window.__POSIT_ENVIRONMENT__ || 'unknown'
+        },
+        error: error.message
+      };
+    }
   },
 
   // Document structure endpoints
@@ -235,6 +353,13 @@ export const apiService = {
     const url = `${basePath}/api/v1/documents/upload-stream/${documentId}`;
     console.log('EventSource URL:', url);
     const eventSource = new EventSource(url);
+    
+    // Error handling for debugging
+    eventSource.onerror = (error) => {
+      console.error('EventSource error:', error);
+      console.log('EventSource readyState:', eventSource.readyState);
+      console.log('EventSource URL was:', url);
+    };
     return eventSource;
   },
 
@@ -310,6 +435,13 @@ export const apiService = {
     const url = `${basePath}/api/v1/chat/message-stream?${params.toString()}`;
     console.log('Chat EventSource URL:', url);
     const eventSource = new EventSource(url);
+    
+    // Error handling for debugging
+    eventSource.onerror = (error) => {
+      console.error('Chat EventSource error:', error);
+      console.log('Chat EventSource readyState:', eventSource.readyState);
+      console.log('Chat EventSource URL was:', url);
+    };
     return eventSource;
   },
 
@@ -328,6 +460,14 @@ export const apiService = {
     const url = `${basePath}/api/v1/chat/quick-start-stream?${params.toString()}`;
     console.log('Quick Start Chat EventSource URL:', url);
     const eventSource = new EventSource(url);
+    
+    // Error handling for debugging
+    eventSource.onerror = (error) => {
+      console.error('Quick Start Chat EventSource error:', error);
+      console.log('Quick Start Chat EventSource readyState:', eventSource.readyState);
+      console.log('Quick Start Chat EventSource URL was:', url);
+    };
+
     return eventSource;
   },
 
@@ -392,7 +532,7 @@ export const apiService = {
     return response.data;
   },
   
-  // Enhanced document info with file persistence awareness
+  // Document info with file persistence awareness
   async getDocumentInfoEnhanced(documentId) {
     const response = await api.get(`/documents/info/${documentId}`);
     const docInfo = response.data;
