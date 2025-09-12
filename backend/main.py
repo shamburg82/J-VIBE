@@ -206,17 +206,85 @@ def get_posit_root_path(port: int = 8000) -> str:
         logger.warning(f"⚠️  Error getting root path: {e}")
         return ''
 
-# Environment detection
+def detect_connect_path() -> str:
+    """Detect Connect root path from environment variables."""
+    
+    # Check for Connect URL in environment
+    connect_url = os.getenv("RSTUDIO_CONNECT_URL")
+    if not connect_url:
+        return ""
+    
+    try:
+        from urllib.parse import urlparse
+        parsed = urlparse(connect_url)
+        
+        # Extract path component, it should be something like:
+        # https://dse-prod-cn.jazzpharma.com/content/{guid}
+        # or https://dse-prod-cn.jazzpharma.com/{custom_name}
+        
+        # Check for content pattern (GUID-based URLs)
+        if '/content/' in parsed.path:
+            # Extract content path
+            content_match = re.search(r'(/content/[^/]+)', parsed.path)
+            if content_match:
+                root_path = content_match.group(1)
+                logger.info(f"✅ Detected Connect content path: {root_path}")
+                return root_path
+        
+        # Check for custom vanity URL pattern
+        elif parsed.path and parsed.path != '/':
+            # For custom URLs, the path itself is the root path
+            root_path = parsed.path.rstrip('/')
+            logger.info(f"✅ Detected Connect vanity path: {root_path}")
+            return root_path
+        
+        logger.warning(f"⚠️  Could not extract path from Connect URL: {connect_url}")
+        return ""
+        
+    except Exception as e:
+        logger.warning(f"⚠️  Error parsing Connect URL: {e}")
+        return ""
+
+# Environment detection with improved Connect detection
 is_connect = bool(os.getenv("RSTUDIO_CONNECT_URL"))
 is_workbench = bool(os.getenv("RS_SERVER_URL")) and not is_connect
 port = int(os.getenv("PORT", "8000"))
-root_path = get_posit_root_path(port) if is_workbench or is_connect else ""
 
-logger.info(f"🚀 Starting TLF Analyzer - Environment: {'Connect' if is_connect else 'Workbench' if is_workbench else 'Local'}")
+# Determine root path based on environment
+if is_connect:
+    root_path = detect_connect_path()
+    logger.info(f"🔗 Connect environment detected")
+elif is_workbench:
+    root_path = get_posit_root_path(port)
+    logger.info(f"🔧 Workbench environment detected")
+else:
+    root_path = ""
+    logger.info(f"💻 Local development environment")
+
+logger.info(f"🚀 Starting JazzVIBE - Environment: {'Connect' if is_connect else 'Workbench' if is_workbench else 'Local'}")
 logger.info(f"📁 Root path: '{root_path}'")
 
+# Log environment variables for debugging
+if is_connect:
+    connect_url = os.getenv('RSTUDIO_CONNECT_URL', 'not set')
+    logger.info(f"🔍 Connect URL: {connect_url}")
+    if connect_url != 'not set' and '/connect/#/apps/' in connect_url:
+        logger.warning("⚠️  RSTUDIO_CONNECT_URL appears to be a dashboard URL")
+        logger.warning("   Please use the direct app URL instead (usually /content/{guid})")
+        logger.warning("   You can find this in the Connect dashboard under 'Open Solo'")
+        
+if is_workbench:
+    logger.info(f"🔍 Server URL: {os.getenv('RS_SERVER_URL', 'not set')}")
+
 # Define static_dir early
-static_dir = Path(__file__).parent.parent / "frontend/build"
+static_dir = Path(__file__).parent.parent / "build"
+if not static_dir.exists():
+    # Try alternative paths
+    static_dir = Path(__file__).parent.parent / "frontend/build"
+    if not static_dir.exists():
+        static_dir = Path(__file__).parent / "frontend/build"
+
+logger.info(f"📁 Static directory: {static_dir} (exists: {static_dir.exists()})")
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
@@ -366,35 +434,74 @@ async def lifespan(app: FastAPI):
         except Exception as e:
             logger.warning(f"⚠️  Error closing MongoDB connections: {e}")
 
-class PathNormalizationMiddleware(BaseHTTPMiddleware):
-    """Middleware to normalize paths for Posit environments."""
+class ConnectPathDetectionMiddleware(BaseHTTPMiddleware):
+    """Enhanced middleware for path detection in Connect environments."""
     
     def __init__(self, app, root_path: str = ""):
         super().__init__(app)
         self.root_path = root_path.rstrip('/') if root_path else ""
+        logger.info(f"🔧 Path middleware initialized with root_path: '{self.root_path}'")
         
     async def dispatch(self, request: Request, call_next):
         original_path = request.url.path
         clean_path = original_path
         
-        # Handle malformed paths with hostnames
-        if clean_path.startswith('//') and '.' in clean_path:
-            temp_path = clean_path.lstrip('/')
-            if '/' in temp_path:
-                parts = temp_path.split('/', 1)
-                if '.' in parts[0]:  # Likely a hostname
-                    clean_path = '/' + parts[1]
+        logger.debug(f"🔍 Processing request: {original_path}")
         
-        # Remove root path prefix
+        # Handle Connect-style URLs that may come with full hostnames
+        if clean_path.startswith('//'):
+            logger.debug(f"🔧 Double slash detected: {clean_path}")
+            temp_path = clean_path.lstrip('/')
+            
+            # Look for hostname patterns
+            if '/' in temp_path and '.' in temp_path.split('/')[0]:
+                parts = temp_path.split('/', 1)
+                hostname_part = parts[0]
+                path_part = parts[1] if len(parts) > 1 else ""
+                
+                # Check if first part looks like a hostname
+                if any(hostname_part.endswith(tld) for tld in ['.com', '.org', '.net', '.edu', '.gov']):
+                    clean_path = '/' + path_part
+                    logger.debug(f"🔧 Extracted path from hostname URL: {clean_path}")
+                else:
+                    clean_path = '/' + temp_path
+            else:
+                clean_path = '/' + temp_path
+        
+        # Remove configured root path prefix if present
         if self.root_path and clean_path.startswith(self.root_path):
             clean_path = clean_path[len(self.root_path):]
             if not clean_path.startswith('/'):
                 clean_path = '/' + clean_path
+            logger.debug(f"🔧 Removed root path prefix: {clean_path}")
         
-        # Clean up double slashes
+        # Clean up multiple slashes
         clean_path = re.sub(r'/+', '/', clean_path)
         
-        # Update request
+        # Special handling for Connect patterns
+        if is_connect:
+            # Look for Connect-specific patterns in the URL
+            connect_patterns = [
+                r'/connect/apps/[^/]+(/.*)?$',  # /connect/apps/{guid}/...
+                r'/content/[^/]+(/.*)?$',       # /content/{guid}/...
+            ]
+            
+            for pattern in connect_patterns:
+                match = re.search(pattern, original_path)
+                if match:
+                    # Extract the app-specific part
+                    app_path = match.group(1) if match.group(1) else '/'
+                    clean_path = app_path
+                    logger.debug(f"🔗 Connect pattern matched, extracted: {clean_path}")
+                    break
+        
+        # Ensure clean path starts with /
+        if not clean_path.startswith('/'):
+            clean_path = '/' + clean_path
+        
+        logger.debug(f"🔧 Final clean path: {clean_path}")
+        
+        # Update request scope
         request.scope['path'] = clean_path
         request.scope['raw_path'] = clean_path.encode()
         
@@ -410,10 +517,12 @@ class ReactFallbackMiddleware(BaseHTTPMiddleware):
     def get_react_html(self) -> str:
         """Get processed React HTML content."""
         if not static_dir.exists():
+            logger.warning(f"📁 Static directory not found: {static_dir}")
             return None
             
         index_file = static_dir / "index.html"
         if not index_file.exists():
+            logger.warning(f"📁 Index file not found: {index_file}")
             return None
         
         # Read HTML file
@@ -422,27 +531,35 @@ class ReactFallbackMiddleware(BaseHTTPMiddleware):
         
         # Process base path if we have one
         if root_path:
-            # Replace paths
+            logger.debug(f"🔧 Processing HTML with root_path: {root_path}")
+            
+            # Replace static file paths
             html_content = html_content.replace('href="./static/', f'href="{root_path}/static/')
             html_content = html_content.replace('src="./static/', f'src="{root_path}/static/')
             html_content = html_content.replace('href="/static/', f'href="{root_path}/static/')
             html_content = html_content.replace('src="/static/', f'src="{root_path}/static/')
+            
+            # Replace manifest and favicon
             html_content = html_content.replace('href="./manifest.json"', f'href="{root_path}/manifest.json"')
             html_content = html_content.replace('href="./favicon.ico"', f'href="{root_path}/favicon.ico"')
             html_content = html_content.replace('href="/manifest.json"', f'href="{root_path}/manifest.json"')
             html_content = html_content.replace('href="/favicon.ico"', f'href="{root_path}/favicon.ico"')
+            
+            # Replace PUBLIC_URL placeholder
             html_content = html_content.replace('%PUBLIC_URL%', root_path)
             
-            # Inject base tag
+            # Inject base tag if not present
             if '<base href=' not in html_content:
                 base_tag = f'<base href="{root_path}/">'
                 html_content = html_content.replace('<head>', f'<head>\n    {base_tag}')
             
-            # Inject JavaScript variable
+            # Inject JavaScript configuration
             js_injection = f'''
     <script>
       window.__POSIT_BASE_PATH__ = '{root_path}';
-      console.log('Server set base path:', window.__POSIT_BASE_PATH__);
+      window.__POSIT_ENVIRONMENT__ = '{"connect" if is_connect else "workbench" if is_workbench else "local"}';
+      console.log('JazzVIBE: Base path set to:', window.__POSIT_BASE_PATH__);
+      console.log('JazzVIBE: Environment:', window.__POSIT_ENVIRONMENT__);
     </script>'''
             
             if '</head>' in html_content:
@@ -473,7 +590,10 @@ class ReactFallbackMiddleware(BaseHTTPMiddleware):
             if not is_api_route and not is_json_only_request and not is_static_file:
                 react_html = self.get_react_html()
                 if react_html:
+                    logger.debug(f"🔧 Serving React app for route: {path}")
                     return HTMLResponse(content=react_html)
+                else:
+                    logger.warning(f"⚠️  Could not serve React app for route: {path}")
         
         return response
 
@@ -495,11 +615,14 @@ app.add_middleware(
 )
 
 # Add middlewares in order
-if root_path:
-    app.add_middleware(PathNormalizationMiddleware, root_path=root_path)
+if root_path or is_connect:
+    app.add_middleware(ConnectPathDetectionMiddleware, root_path=root_path)
 
 if static_dir.exists():
     app.add_middleware(ReactFallbackMiddleware)
+    logger.info(f"📁 React app will be served from: {static_dir}")
+else:
+    logger.warning(f"📁 React build directory not found: {static_dir}")
 
 # Dependency functions to get services
 def get_document_service():
@@ -548,7 +671,9 @@ async def health_check():
         "environment": {
             "is_connect": is_connect,
             "is_workbench": is_workbench,
-            "port": os.getenv("PORT", "8000")
+            "port": os.getenv("PORT", "8000"),
+            "connect_url": os.getenv("RSTUDIO_CONNECT_URL", "not_set"),
+            "server_url": os.getenv("RS_SERVER_URL", "not_set")
         },
         "services_initialized": {
             "document_service": document_service is not None,
@@ -586,8 +711,75 @@ async def health_no_slash():
             "unique_documents": storage_info.get('unique_documents', 0),
             "storage_size_mb": storage_info.get('storage_size_mb', 0)
         },
-        "version": "1.0.0"
+        "version": "1.0.0",
+        "environment_info": {
+            "is_connect": is_connect,
+            "is_workbench": is_workbench,
+            "detected_root_path": root_path,
+            "static_files_available": static_dir.exists()
+        }
     }
+
+# Enhanced debug endpoint for Connect path detection
+@app.get("/debug/path-info")
+async def debug_path_info(request: Request):
+    """Enhanced debug endpoint for Connect path detection."""
+    
+    original_path = str(request.url.path)
+    full_url = str(request.url)
+    
+    # Analyze the current request
+    path_analysis = {
+        "original_request": {
+            "full_url": full_url,
+            "path": original_path,
+            "query": str(request.url.query),
+            "hostname": request.url.hostname,
+            "port": request.url.port,
+            "scheme": request.url.scheme
+        },
+        "environment": {
+            "is_connect": is_connect,
+            "is_workbench": is_workbench,
+            "detected_root_path": root_path,
+            "connect_url": os.getenv("RSTUDIO_CONNECT_URL", "not_set"),
+            "server_url": os.getenv("RS_SERVER_URL", "not_set")
+        },
+        "path_detection": {
+            "configured_root_path": root_path,
+            "static_dir_exists": static_dir.exists(),
+            "static_dir_path": str(static_dir)
+        },
+        "request_headers": dict(request.headers),
+        "connect_patterns": {
+            "content_pattern": bool(re.search(r'/content/[^/]+', original_path)),
+            "connect_apps_pattern": bool(re.search(r'/connect/apps/[^/]+', original_path)),
+            "vanity_url_pattern": bool(re.search(r'^/[^/]+/?', original_path) and not original_path.startswith('/api'))
+        }
+    }
+    
+    # Test Connect URL parsing if available
+    if is_connect and os.getenv("RSTUDIO_CONNECT_URL"):
+        try:
+            from urllib.parse import urlparse
+            parsed = urlparse(os.getenv("RSTUDIO_CONNECT_URL"))
+            path_analysis["connect_url_analysis"] = {
+                "parsed_scheme": parsed.scheme,
+                "parsed_hostname": parsed.hostname,
+                "parsed_path": parsed.path,
+                "content_pattern_in_env": '/content/' in parsed.path,
+                "extracted_content_path": None
+            }
+            
+            # Try to extract content path
+            content_match = re.search(r'(/content/[^/]+)', parsed.path)
+            if content_match:
+                path_analysis["connect_url_analysis"]["extracted_content_path"] = content_match.group(1)
+                
+        except Exception as e:
+            path_analysis["connect_url_analysis"] = {"error": str(e)}
+    
+    return path_analysis
 
 # MongoDB-specific endpoints
 @app.get("/api/v1/mongodb/status")
@@ -619,7 +811,7 @@ async def get_storage_info():
         raise HTTPException(status_code=500, detail=f"Failed to get storage info: {str(e)}")
 
 # Static files and specific routes
-if static_dir.exists():
+if static_dir and static_dir.exists():
     logger.info(f"📁 Serving React static files from: {static_dir}")
     
     @app.get("/static/{file_path:path}")
@@ -628,6 +820,7 @@ if static_dir.exists():
         static_file_path = static_dir / "static" / file_path
         
         if not static_file_path.exists():
+            logger.warning(f"Static file not found: {static_file_path}")
             raise HTTPException(status_code=404, detail="Static file not found")
         
         # Determine MIME type based on file extension
@@ -697,6 +890,11 @@ if static_dir.exists():
                 "vector_store": {
                     "enabled": vector_status.get("enabled", False),
                     "type": vector_status.get("type", "unknown")
+                },
+                "environment": {
+                    "is_connect": is_connect,
+                    "is_workbench": is_workbench,
+                    "root_path_detected": bool(root_path)
                 }
             }
         
@@ -728,7 +926,12 @@ else:
             "vector_store": {
                 "enabled": vector_status.get("enabled", False),
                 "type": vector_status.get("type", "unknown")
-            }
+            },
+                "environment": {
+                    "is_connect": is_connect,
+                    "is_workbench": is_workbench,
+                    "root_path_detected": bool(root_path)
+                }
         }
 
 # Additional convenience endpoints for chat integration
