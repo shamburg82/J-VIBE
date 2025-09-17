@@ -140,7 +140,7 @@ const Navbar = ({ userRole, environment = {} }) => {
             component="div" 
             sx={{ fontWeight: 'bold', mr: 3 }}
           >
-            TLF Analyzer
+            Jazz VIBE
           </Typography>
 
           {/* Breadcrumbs */}
