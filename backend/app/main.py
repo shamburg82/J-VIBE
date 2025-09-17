@@ -106,7 +106,7 @@ async def lifespan(app: FastAPI):
     yield
     
     # Shutdown
-    logger.info("🛑 Shutting down TLF Analyzer API")
+    logger.info("🛑 Shutting down Jazz VIBE API")
 
 
 # Create FastAPI app with lifespan
