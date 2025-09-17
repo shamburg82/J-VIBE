@@ -107,8 +107,8 @@ async def upload_document(
             raise HTTPException(status_code=400, detail="Only PDF files are supported")
         
         # Check file size
-        if file.size and file.size > 50 * 1024 * 1024:  # 50MB limit
-            raise HTTPException(status_code=400, detail="File size too large (max 50MB)")
+        if file.size and file.size > 200 * 1024 * 1024:  # 200MB limit
+            raise HTTPException(status_code=400, detail="File size too large (max 200MB)")
         
         # Generate document ID
         document_id = str(uuid.uuid4())
