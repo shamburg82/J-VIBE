@@ -12,7 +12,21 @@ from llama_index.core import Settings
 
 from .posit_config import get_posit_config
 
-nest_asyncio.apply()
+
+# FIXED: Only apply nest_asyncio if not using uvloop
+try:
+    loop = asyncio.get_event_loop()
+    if not isinstance(loop, type(asyncio.new_event_loop())):
+        # We're using a different loop (like uvloop), don't patch
+        logger = logging.getLogger(__name__)
+        logger.info("Using alternative event loop, skipping nest_asyncio.apply()")
+    else:
+        nest_asyncio.apply()
+except Exception as e:
+    # If we can't determine loop type safely, skip patching
+    logger = logging.getLogger(__name__)
+    logger.warning(f"Could not determine event loop type, skipping nest_asyncio: {e}")
+
 logger = logging.getLogger(__name__)
 
 
