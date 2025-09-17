@@ -24,49 +24,20 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 # Global state for initialization
-INITIALIZATION_LOCK = threading.Lock()
-INITIALIZATION_THREAD = None
+# INITIALIZATION_LOCK = threading.Lock()
 INITIALIZATION_COMPLETE = False
 INITIALIZATION_ERROR = None
 INITIALIZATION_STATUS = "pending"
-INITIALIZATION_PROGRESS = {}
-INITIALIZATION_STARTED = False
 
-# Global state for runtime installer
-RUNTIME_INSTALLATION_COMPLETE = False
-RUNTIME_INSTALLATION_ERROR = None
-RUNTIME_INSTALLATION_STATUS = "pending"
+# Global service variables - Initialize to None but will be set during startup
+document_service = None
+query_service = None
+storage_service = None
+chat_service = None
 
-def check_package_availability():
-    """Check if required packages are available."""
-    packages_status = {}
-    
-    try:
-        import aiobotocore
-        import boto3
-        packages_status["aiobotocore"] = {"available": True, "version": getattr(aiobotocore, '__version__', 'unknown')}
-        packages_status["boto3"] = {"available": True, "version": getattr(boto3, '__version__', 'unknown')}
-    except ImportError as e:
-        packages_status["aiobotocore"] = {"available": False, "error": str(e)}
-        packages_status["boto3"] = {"available": False, "error": str(e)}
-    
-    try:
-        import llama_index.llms.bedrock_converse
-        packages_status["bedrock_converse"] = {"available": True, "version": "installed"}
-    except ImportError as e:
-        packages_status["bedrock_converse"] = {"available": False, "error": str(e)}
-    
-    try:
-        import aioboto3
-        packages_status["aioboto3"] = {"available": True, "version": getattr(aioboto3, '__version__', 'unknown')}
-    except ImportError as e:
-        packages_status["aioboto3"] = {"available": False, "error": str(e)}
-    
-    return packages_status
-
-def install_package_with_no_deps(package_spec, timeout=120):
-    """Install a package with --no-deps option."""
-    cmd = [sys.executable, "-m", "pip", "install", "--no-cache-dir", "--no-deps", package_spec]
+def install_package_runtime(package_spec, timeout=300):
+    """Install a package at runtime with better error handling."""
+    cmd = [sys.executable, "-m", "pip", "install", "--no-cache-dir", "--no-deps", "--quiet", package_spec]
     
     logger.info(f"Installing {package_spec} with --no-deps")
     
@@ -78,6 +49,7 @@ def install_package_with_no_deps(package_spec, timeout=120):
             return True
         else:
             logger.error(f"❌ Failed to install {package_spec}: {result.stderr}")
+            logger.error(f"   stdout: {result.stdout}")
             return False
             
     except subprocess.TimeoutExpired:
@@ -87,73 +59,86 @@ def install_package_with_no_deps(package_spec, timeout=120):
         logger.error(f"❌ Exception during installation of {package_spec}: {e}")
         return False
 
-def runtime_package_installer():
-    """Install required packages with --no-deps at runtime."""
-    global RUNTIME_INSTALLATION_COMPLETE, RUNTIME_INSTALLATION_ERROR, RUNTIME_INSTALLATION_STATUS
+def check_and_install_packages():
+    """Check and install required packages for Connect environment."""
+    global INITIALIZATION_ERROR, INITIALIZATION_STATUS
     
     try:
-        RUNTIME_INSTALLATION_STATUS = "running"
-        logger.info("🔧 Starting runtime package installation...")
+        INITIALIZATION_STATUS = "installing_packages"
+        logger.info("🔧 Checking required packages for Connect deployment...")
         
-        packages_status = check_package_availability()
-        logger.info(f"Package status: {packages_status}")
+        # Check current package availability
+        packages_needed = []
         
-        required_packages = ["aiobotocore", "bedrock_converse", "aioboto3"]
-        missing_packages = [pkg for pkg in required_packages if not packages_status.get(pkg, {}).get("available", False)]
+        try:
+            import llama_index.llms.bedrock_converse
+            logger.info("✅ bedrock_converse available")
+        except ImportError:
+            logger.info("❌ bedrock_converse not available, will install")
+            packages_needed.append("llama-index-llms-bedrock-converse==0.6.0")
         
-        if not missing_packages:
-            logger.info("✅ All required packages are already available!")
-            RUNTIME_INSTALLATION_COMPLETE = True
-            RUNTIME_INSTALLATION_STATUS = "complete"
-            return True
+        try:
+            import aioboto3
+            logger.info("✅ aioboto3 available") 
+        except ImportError:
+            logger.info("❌ aioboto3 not available, will install")
+            packages_needed.append("aioboto3==13.4.0")
         
-        logger.info(f"Installing missing packages: {missing_packages}")
-        
-        success = True
-        
-        if "bedrock_converse" in missing_packages:
-            if not install_package_with_no_deps("llama-index-llms-bedrock-converse==0.6.0"):
-                success = False
-        
-        if "aioboto3" in missing_packages:
-            if not install_package_with_no_deps("aioboto3==13.4.0"):
-                success = False
-        
-        if success:
-            logger.info("🔍 Verifying installations...")
-            final_status = check_package_availability()
+        # Install missing packages
+        if packages_needed:
+            logger.info(f"Installing {len(packages_needed)} missing packages...")
             
-            still_missing = [pkg for pkg in required_packages if not final_status.get(pkg, {}).get("available", False)]
+            for package in packages_needed:
+                success = install_package_runtime(package)
+                if not success:
+                    error_msg = f"Failed to install {package}"
+                    logger.error(f"❌ {error_msg}")
+                    INITIALIZATION_ERROR = error_msg
+                    return False
             
-            if not still_missing:
-                logger.info("✅ All packages installed and verified successfully!")
-                RUNTIME_INSTALLATION_COMPLETE = True
-                RUNTIME_INSTALLATION_STATUS = "complete"
-                return True
-            else:
-                error_msg = f"Installation appeared successful but imports still fail for: {still_missing}"
+            # Verify installations
+            logger.info("🔍 Verifying package installations...")
+            
+            try:
+                import llama_index.llms.bedrock_converse
+                logger.info("✅ bedrock_converse import successful after installation")
+            except ImportError as e:
+                error_msg = f"bedrock_converse still not importable after installation: {e}"
                 logger.error(f"❌ {error_msg}")
-                RUNTIME_INSTALLATION_ERROR = error_msg
-                RUNTIME_INSTALLATION_STATUS = "failed"
+                INITIALIZATION_ERROR = error_msg
                 return False
-        else:
-            error_msg = "Package installation failed"
-            logger.error(f"❌ {error_msg}")
-            RUNTIME_INSTALLATION_ERROR = error_msg
-            RUNTIME_INSTALLATION_STATUS = "failed"
-            return False
             
+            try:
+                import aioboto3
+                logger.info("✅ aioboto3 import successful after installation")
+            except ImportError as e:
+                error_msg = f"aioboto3 still not importable after installation: {e}"
+                logger.error(f"❌ {error_msg}")
+                INITIALIZATION_ERROR = error_msg
+                return False
+        
+        logger.info("✅ All required packages are available")
+        return True
+        
     except Exception as e:
-        error_msg = f"Runtime package installation failed: {str(e)}"
+        error_msg = f"Package check/installation failed: {str(e)}"
         logger.error(f"❌ {error_msg}")
-        RUNTIME_INSTALLATION_ERROR = error_msg
-        RUNTIME_INSTALLATION_STATUS = "failed"
+        INITIALIZATION_ERROR = error_msg
         return False
+ 
+# Run package installation immediately for Connect
+SKIP_PACKAGE_INSTALL = os.getenv("SKIP_PACKAGE_INSTALL", "false").lower() == "true"
 
-# Start runtime installation immediately
-logger.info("🚀 Starting runtime package installation in background...")
-executor = ThreadPoolExecutor(max_workers=2)
-runtime_install_future = executor.submit(runtime_package_installer)
+if not SKIP_PACKAGE_INSTALL:
+    # Your existing package installation code
+    package_install_success = check_and_install_packages()
+else:
+    logger.info("Skipping package installation (SKIP_PACKAGE_INSTALL=true)")
+    package_install_success = True
+
+if not package_install_success:
+    logger.error("❌ Package installation failed - some features may not work")
+    logger.error(f"   Error: {INITIALIZATION_ERROR}")
 
 
 
@@ -167,16 +152,14 @@ from fastapi.responses import FileResponse, HTMLResponse, JSONResponse
 from fastapi.middleware.cors import CORSMiddleware
 from starlette.middleware.base import BaseHTTPMiddleware
 from contextlib import asynccontextmanager
-
-# Configure logging
-logging.basicConfig(level=logging.INFO)
-logger = logging.getLogger(__name__)
-
-# Global service variables
-document_service = None
-query_service = None
-storage_service = None
-chat_service = None
+# try:
+#     from app.services.storage_service import StorageService
+#     from app.services.document_service import DocumentService  
+#     from app.services.query_service import QueryService
+#     from app.services.chat_service import ChatService
+#     logger.info("✅ Service imports successful")
+# except ImportError as e:
+#     logger.error(f"❌ Service imports failed: {e}")
 
 def get_posit_root_path(port: int = 8000) -> str:
     """Get root path for Posit Workbench using rserver-url."""
@@ -268,10 +251,6 @@ logger.info(f"📁 Root path: '{root_path}'")
 if is_connect:
     connect_url = os.getenv('RSTUDIO_CONNECT_URL', 'not set')
     logger.info(f"🔍 Connect URL: {connect_url}")
-    if connect_url != 'not set' and '/connect/#/apps/' in connect_url:
-        logger.warning("⚠️  RSTUDIO_CONNECT_URL appears to be a dashboard URL")
-        logger.warning("   Please use the direct app URL instead (usually /content/{guid})")
-        logger.warning("   You can find this in the Connect dashboard under 'Open Solo'")
         
 if is_workbench:
     logger.info(f"🔍 Server URL: {os.getenv('RS_SERVER_URL', 'not set')}")
@@ -286,145 +265,147 @@ if not static_dir.exists():
 
 logger.info(f"📁 Static directory: {static_dir} (exists: {static_dir.exists()})")
 
+async def initialize_services_with_retry(max_retries=3, delay=5):
+    """Initialize services with retry logic for Connect deployment."""
+    global document_service, query_service, storage_service, chat_service
+    global INITIALIZATION_COMPLETE, INITIALIZATION_ERROR, INITIALIZATION_STATUS
+    
+    for attempt in range(max_retries):
+        try:
+            INITIALIZATION_STATUS = f"initializing_attempt_{attempt + 1}"
+            logger.info(f"🔧 Service initialization attempt {attempt + 1}/{max_retries}")
+            
+            # Import and get configuration
+            config = None
+            if is_connect or is_workbench:
+                try:
+                    from app.core.posit_config import get_posit_config
+                    config = get_posit_config()
+                    logger.info(f"Using Posit configuration: {config.get_environment_name()}")
+                except ImportError as e:
+                    logger.warning(f"Could not import Posit config: {e}, using standard config")
+                    from app.core.config import get_config
+                    config = get_config()
+            else:
+                from app.core.config import get_config
+                config = get_config()
+            
+            # Log configuration details
+            logger.info(f"Vector store configuration:")
+            logger.info(f"  - Enabled: {config.use_vector_store}")
+            logger.info(f"  - Type: {config.vector_store_type}")
+            
+            # Initialize Bedrock LLM
+            logger.info("🤖 Initializing Bedrock LLM...")
+            llm = None
+            
+            if is_connect or is_workbench:
+                try:
+                    from app.core.posit_bedrock_setup import configure_bedrock_for_posit
+                    llm = await configure_bedrock_for_posit()
+                except ImportError:
+                    logger.warning("Could not import Posit Bedrock setup, using standard setup")
+                    from app.core.bedrock_setup import configure_bedrock_llm
+                    llm = await configure_bedrock_llm()
+            else:
+                from app.core.bedrock_setup import configure_bedrock_llm
+                llm = await configure_bedrock_llm()
+                
+            if not llm:
+                raise Exception("Failed to initialize Bedrock LLM")
+            
+            logger.info("✅ Bedrock LLM initialized successfully")
+            
+            # Initialize storage service
+            logger.info("🗄️ Initializing storage service...")
+            
+            if config.is_mongodb_enabled():
+                logger.info("📊 Initializing MongoDB Atlas vector store...")
+                from app.services.storage_service import StorageService
+                
+                mongodb_config = config.get_mongodb_config()
+                storage_service = StorageService(
+                    mongodb_connection_string=mongodb_config['connection_string'],
+                    database_name=mongodb_config['database_name'],
+                    collection_name=mongodb_config['collection_name']
+                )
+                
+                logger.info("✅ MongoDB storage service initialized")
+            else:
+                logger.info("💾 Using in-memory vector store (fallback)")
+                from app.services.storage_service import StorageService
+                storage_service = StorageService()
+                logger.warning("⚠️ MongoDB storage service loaded but will use fallback behavior")
+            
+            # Initialize document service
+            logger.info("📄 Initializing document service...")
+            from app.services.document_service import DocumentService
+            document_service = DocumentService(
+                llm=llm, 
+                storage_service=storage_service,
+                config=config
+            )
+            logger.info("✅ Document service initialized")
+            
+            # Initialize query service
+            logger.info("🔍 Initializing query service...")
+            from app.services.query_service import QueryService
+            query_service = QueryService(llm=llm, storage_service=storage_service)
+            logger.info("✅ Query service initialized")
+            
+            # Initialize chat service
+            logger.info("💬 Initializing chat service...")
+            from app.services.chat_service import ChatService
+            chat_service = ChatService(
+                llm=llm, 
+                storage_service=storage_service, 
+                query_service=query_service
+            )
+            logger.info("✅ Chat service initialized")
+            
+            # Verify all services are properly initialized
+            if all([document_service, query_service, storage_service, chat_service]):
+                INITIALIZATION_COMPLETE = True
+                INITIALIZATION_STATUS = "complete"
+                logger.info("✅ All services initialized successfully!")
+                return True
+            else:
+                raise Exception("One or more services failed to initialize properly")
+                
+        except Exception as e:
+            error_msg = f"Service initialization attempt {attempt + 1} failed: {str(e)}"
+            logger.error(f"❌ {error_msg}")
+            INITIALIZATION_ERROR = error_msg
+            
+            if attempt < max_retries - 1:
+                logger.info(f"⏳ Retrying in {delay} seconds...")
+                await asyncio.sleep(delay)
+            else:
+                INITIALIZATION_STATUS = "failed"
+                logger.error("❌ All initialization attempts failed")
+                return False
+    
+    return False
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """Application lifespan manager - startup and shutdown."""
     global document_service, query_service, storage_service, chat_service
     
     # Startup
-    logger.info("🚀 Starting TLF Analyzer API services")
+    logger.info("🚀 Starting Jazz VIBE API services")
     
-    try:
-        # Detect environment and get appropriate config
-        config = None
-        if is_connect or is_workbench:
-            # Use Posit-specific configuration
-            try:
-                from app.core.posit_config import get_posit_config
-                config = get_posit_config()
-                logger.info(f"Using Posit configuration: {config.get_environment_name()}")
-            except ImportError as e:
-                logger.warning(f"Could not import Posit config: {e}, using standard config")
-                from app.core.config import get_config
-                config = get_config()
-        else:
-            # Use standard configuration
-            from app.core.config import get_config
-            config = get_config()
-        
-        # Log configuration details
-        logger.info(f"Vector store configuration:")
-        logger.info(f"  - Enabled: {config.use_vector_store}")
-        logger.info(f"  - Type: {config.vector_store_type}")
-        
-        if config.is_mongodb_enabled():
-            mongodb_config = config.get_mongodb_config()
-            logger.info(f"MongoDB configuration:")
-            logger.info(f"  - Host: {mongodb_config['host']}")
-            logger.info(f"  - Database: {mongodb_config['database_name']}")
-            logger.info(f"  - Collection: {mongodb_config['collection_name']}")
-            logger.info(f"  - Connection string configured: {bool(mongodb_config['connection_string'])}")
-        
-        # Initialize Bedrock LLM with appropriate setup
-        if is_connect or is_workbench:
-            try:
-                from app.core.posit_bedrock_setup import configure_bedrock_for_posit
-                llm = await configure_bedrock_for_posit()
-            except ImportError:
-                logger.warning("Could not import Posit Bedrock setup, using standard setup")
-                from app.core.bedrock_setup import configure_bedrock_llm
-                llm = await configure_bedrock_llm()
-        else:
-            from app.core.bedrock_setup import configure_bedrock_llm
-            llm = await configure_bedrock_llm()
-            
-        if not llm:
-            raise Exception("Failed to initialize Bedrock LLM")
-        
-        # Initialize storage service based on configuration
-        logger.info("🗄️  Initializing storage service...")
-        
-        if config.is_mongodb_enabled():
-            logger.info("📊 Initializing MongoDB Atlas vector store...")
-            from app.services.storage_service import StorageService
-            
-            mongodb_config = config.get_mongodb_config()
-            storage_service = StorageService(
-                mongodb_connection_string=mongodb_config['connection_string'],
-                database_name=mongodb_config['database_name'],
-                collection_name=mongodb_config['collection_name']
-            )
-            
-            logger.info("✅ MongoDB storage service initialized")
-            
-            # Test MongoDB connection
-            try:
-                storage_info = await storage_service.get_storage_info()
-                logger.info(f"✅ MongoDB connection verified - Database: {storage_info.get('database_name')}")
-                logger.info(f"📊 Current MongoDB stats: {storage_info.get('total_vectors', 0)} vectors, {storage_info.get('unique_documents', 0)} documents")
-            except Exception as mongo_test_error:
-                logger.error(f"❌ MongoDB connection test failed: {mongo_test_error}")
-                logger.warning("⚠️  Continuing with initialization - MongoDB may not be fully configured")
-        
-        else:
-            logger.info("💾 Using in-memory vector store (fallback)")
-            # Import the original in-memory storage service
-            try:
-                # Try to import an in-memory version if it exists
-                from app.services.storage_service_memory import InMemoryStorageService
-                storage_service = InMemoryStorageService()
-            except ImportError:
-                # Use the MongoDB storage service but it will handle the error gracefully
-                from app.services.storage_service import StorageService
-                storage_service = StorageService()
-                logger.warning("⚠️  MongoDB storage service loaded but will use fallback behavior")
-        
-        # Initialize document service
-        logger.info("📄 Initializing document service...")
-        from app.services.document_service import DocumentService
-        document_service = DocumentService(
-            llm=llm, 
-            storage_service=storage_service,
-            config=config
-        )
-        logger.info("✅ Document service initialized")
-        
-        # Initialize query service
-        logger.info("🔍 Initializing query service...")
-        from app.services.query_service import QueryService
-        query_service = QueryService(llm=llm, storage_service=storage_service)
-        logger.info("✅ Query service initialized")
-        
-        # Initialize chat service
-        logger.info("💬 Initializing chat service...")
-        from app.services.chat_service import ChatService
-        chat_service = ChatService(
-            llm=llm, 
-            storage_service=storage_service, 
-            query_service=query_service
-        )
-        logger.info("✅ Chat service initialized")
-        
-        # Get final status
-        vector_status = await document_service.get_vector_store_status()
-        logger.info("✅ All services initialized successfully")
-        logger.info(f"📊 System ready - Vector store: {vector_status.get('type', 'none')}")
-        logger.info(f"📁 Document storage: {vector_status.get('storage_path', 'unknown')}")
-        
-        if vector_status.get('storage_service_info'):
-            storage_info = vector_status['storage_service_info']
-            if storage_info.get('storage_type') == 'mongodb_atlas':
-                logger.info(f"🗄️  MongoDB: {storage_info.get('total_vectors', 0)} vectors, {storage_info.get('storage_size_mb', 0)}MB")
-        
-    except Exception as e:
-        logger.error(f"❌ Failed to initialize services: {e}")
-        logger.exception("Service initialization error details:")
-        raise
+    # Initialize services with retry logic
+    success = await initialize_services_with_retry()
+    
+    if not success:
+        logger.error("❌ Failed to initialize services after all retries")
+        # Don't raise exception - let app start but services will show as not initialized
     
     yield
     
     # Shutdown
-    logger.info("🛑 Shutting down TLF Analyzer API")
+    logger.info("🛑 Shutting down Jazz VIBE API")
     
     # Clean up MongoDB connections
     if storage_service and hasattr(storage_service, 'close_connection'):
@@ -483,6 +464,7 @@ class ConnectPathDetectionMiddleware(BaseHTTPMiddleware):
             # Look for Connect-specific patterns in the URL
             connect_patterns = [
                 r'/connect/apps/[^/]+(/.*)?$',  # /connect/apps/{guid}/...
+                r'/connect/#/apps/[^/]+(/.*)?$',  # /connect/#/apps/{guid}/...
                 r'/content/[^/]+(/.*)?$',       # /content/{guid}/...
             ]
             
@@ -663,10 +645,36 @@ except ImportError as e:
 # Direct health endpoint
 @app.get("/health")
 async def health_check():
-    vector_status = await document_service.get_vector_store_status() if document_service else {}
+    global INITIALIZATION_COMPLETE, INITIALIZATION_ERROR, INITIALIZATION_STATUS
+    
+    # Get service status
+    services_initialized = {
+        "document_service": document_service is not None,
+        "query_service": query_service is not None,
+        "storage_service": storage_service is not None,
+        "chat_service": chat_service is not None
+    }
+    
+    # Get vector store status if document service is available
+    vector_status = {}
+    if document_service:
+        try:
+            vector_status = await document_service.get_vector_store_status()
+        except Exception as e:
+            logger.warning(f"Could not get vector store status: {e}")
+            vector_status = {"error": str(e)}
+    
+    overall_status = "healthy" if INITIALIZATION_COMPLETE else "degraded"
+    if INITIALIZATION_STATUS == "failed":
+        overall_status = "unhealthy"
     
     return {
-        "status": "healthy",
+        "status": overall_status,
+        "initialization": {
+            "complete": INITIALIZATION_COMPLETE,
+            "status": INITIALIZATION_STATUS,
+            "error": INITIALIZATION_ERROR
+        },
         "root_path": root_path,
         "environment": {
             "is_connect": is_connect,
@@ -675,49 +683,94 @@ async def health_check():
             "connect_url": os.getenv("RSTUDIO_CONNECT_URL", "not_set"),
             "server_url": os.getenv("RS_SERVER_URL", "not_set")
         },
-        "services_initialized": {
-            "document_service": document_service is not None,
-            "query_service": query_service is not None,
-            "storage_service": storage_service is not None,
-            "chat_service": chat_service is not None
-        },
-        "vector_store": {
-            "enabled": vector_status.get("enabled", False),
-            "type": vector_status.get("type", "unknown"),
-            "total_documents": vector_status.get("total_documents", 0)
-        }
+        "services_initialized": services_initialized,
+        "vector_store": vector_status
     }
 
-# Add explicit route for health without trailing slash
+# Detailed health endpoint
 @app.get("/api/v1/health")
-async def health_no_slash():
-    """Health endpoint without trailing slash to match frontend expectations."""
+async def health_detailed():
+    """Detailed health endpoint with comprehensive status."""
+    global INITIALIZATION_COMPLETE, INITIALIZATION_ERROR, INITIALIZATION_STATUS
     
-    vector_status = await document_service.get_vector_store_status() if document_service else {}
-    storage_info = vector_status.get('storage_service_info', {})
+    # Check each service individually
+    services_status = {}
+    
+    if document_service:
+        try:
+            doc_count = await document_service.get_document_count()
+            services_status["document_service"] = f"healthy - {doc_count} documents"
+        except Exception as e:
+            services_status["document_service"] = f"error - {str(e)}"
+    else:
+        services_status["document_service"] = "not initialized"
+    
+    if query_service:
+        try:
+            query_count = await query_service.get_query_count()
+            services_status["query_service"] = f"healthy - {query_count} queries processed"
+        except Exception as e:
+            services_status["query_service"] = f"error - {str(e)}"
+    else:
+        services_status["query_service"] = "not initialized"
+    
+    if storage_service:
+        try:
+            storage_info = await storage_service.get_storage_info()
+            services_status["storage_service"] = f"healthy - {storage_info.get('total_indexes', 0)} indexes"
+        except Exception as e:
+            services_status["storage_service"] = f"error - {str(e)}"
+    else:
+        services_status["storage_service"] = "not initialized"
+    
+    if chat_service:
+        try:
+            chat_stats = await chat_service.get_chat_statistics()
+            services_status["chat_service"] = f"healthy - {chat_stats.get('total_sessions', 0)} sessions"
+        except Exception as e:
+            services_status["chat_service"] = f"error - {str(e)}"
+    else:
+        services_status["chat_service"] = "not initialized"
+    
+    # System resources
+    try:
+        import psutil
+        memory_usage = psutil.virtual_memory()
+        disk_usage = psutil.disk_usage('/')
+        
+        system_stats = {
+            "memory_usage_percent": memory_usage.percent,
+            "memory_available_gb": round(memory_usage.available / (1024**3), 2),
+            "disk_usage_percent": disk_usage.percent,
+            "disk_free_gb": round(disk_usage.free / (1024**3), 2),
+            "cpu_count": psutil.cpu_count(),
+            "uptime_seconds": int(time.time() - (time.time() - psutil.boot_time()))
+        }
+    except Exception as e:
+        system_stats = {"error": f"Could not get system stats: {e}"}
+    
+    overall_status = "healthy" if INITIALIZATION_COMPLETE else "degraded"
+    if INITIALIZATION_STATUS == "failed":
+        overall_status = "unhealthy"
     
     return {
-        "status": "healthy",
+        "status": overall_status,
         "timestamp": datetime.now(),
-        "services": {
-            "api": "healthy",
-            "bedrock": "healthy" if document_service else "not_initialized",
-            "storage": "healthy" if storage_service else "not_initialized",
-            "mongodb": "healthy" if storage_info.get('storage_type') == 'mongodb_atlas' else "not_configured"
+        "initialization": {
+            "complete": INITIALIZATION_COMPLETE,
+            "status": INITIALIZATION_STATUS,
+            "error": INITIALIZATION_ERROR,
+            "packages_installed": package_install_success
         },
-        "storage_info": {
-            "type": storage_info.get('storage_type', 'unknown'),
-            "total_vectors": storage_info.get('total_vectors', 0),
-            "unique_documents": storage_info.get('unique_documents', 0),
-            "storage_size_mb": storage_info.get('storage_size_mb', 0)
-        },
-        "version": "1.0.0",
-        "environment_info": {
+        "services": services_status,
+        "system": system_stats,
+        "environment": {
             "is_connect": is_connect,
             "is_workbench": is_workbench,
             "detected_root_path": root_path,
             "static_files_available": static_dir.exists()
-        }
+        },
+        "version": "1.0.0"
     }
 
 # Enhanced debug endpoint for Connect path detection
@@ -1026,6 +1079,304 @@ async def get_chat_examples():
             "Ask about statistical significance and confidence intervals"
         ]
     }
+
+
+@app.get("/debug/service-initialization")
+async def debug_service_initialization():
+    """Debug service initialization step by step."""
+    
+    debug_info = {
+        "timestamp": datetime.now(),
+        "global_state": {
+            "INITIALIZATION_COMPLETE": INITIALIZATION_COMPLETE,
+            "INITIALIZATION_ERROR": INITIALIZATION_ERROR,
+            "INITIALIZATION_STATUS": INITIALIZATION_STATUS,
+        },
+        "services_state": {
+            "document_service": document_service is not None,
+            "query_service": query_service is not None,
+            "storage_service": storage_service is not None,
+            "chat_service": chat_service is not None,
+        },
+        "manual_test_results": {},
+        "step_by_step_test": []
+    }
+    
+    # Test 1: Can we import the services?
+    try:
+        debug_info["step_by_step_test"].append("Testing service imports...")
+        
+        from app.core.config import get_config
+        debug_info["step_by_step_test"].append("✅ Config import successful")
+        
+        from app.core.bedrock_setup import configure_bedrock_llm
+        debug_info["step_by_step_test"].append("✅ Bedrock setup import successful")
+        
+        from app.services.storage_service import StorageService
+        debug_info["step_by_step_test"].append("✅ Storage service import successful")
+        
+        from app.services.document_service import DocumentService
+        debug_info["step_by_step_test"].append("✅ Document service import successful")
+        
+        from app.services.query_service import QueryService
+        debug_info["step_by_step_test"].append("✅ Query service import successful")
+        
+        from app.services.chat_service import ChatService
+        debug_info["step_by_step_test"].append("✅ Chat service import successful")
+        
+    except Exception as e:
+        debug_info["step_by_step_test"].append(f"❌ Import failed: {str(e)}")
+        debug_info["manual_test_results"]["import_error"] = str(e)
+    
+    # Test 2: Can we get config?
+    try:
+        debug_info["step_by_step_test"].append("Testing config loading...")
+        
+        if is_connect or is_workbench:
+            try:
+                from app.core.posit_config import get_posit_config
+                config = get_posit_config()
+                debug_info["step_by_step_test"].append("✅ Posit config loaded")
+                debug_info["manual_test_results"]["config_type"] = "posit"
+            except ImportError:
+                from app.core.config import get_config
+                config = get_config()
+                debug_info["step_by_step_test"].append("✅ Standard config loaded (Posit import failed)")
+                debug_info["manual_test_results"]["config_type"] = "standard"
+        else:
+            from app.core.config import get_config
+            config = get_config()
+            debug_info["step_by_step_test"].append("✅ Standard config loaded")
+            debug_info["manual_test_results"]["config_type"] = "standard"
+        
+        debug_info["manual_test_results"]["vector_store_enabled"] = config.use_vector_store
+        debug_info["manual_test_results"]["vector_store_type"] = config.vector_store_type
+        debug_info["manual_test_results"]["mongodb_enabled"] = config.is_mongodb_enabled()
+        
+    except Exception as e:
+        debug_info["step_by_step_test"].append(f"❌ Config loading failed: {str(e)}")
+        debug_info["manual_test_results"]["config_error"] = str(e)
+        return debug_info  # Stop here if config fails
+    
+    # Test 3: Can we create Bedrock LLM?
+    try:
+        debug_info["step_by_step_test"].append("Testing Bedrock LLM creation...")
+        
+        if is_connect or is_workbench:
+            try:
+                from app.core.posit_bedrock_setup import configure_bedrock_for_posit
+                llm = await configure_bedrock_for_posit()
+                debug_info["step_by_step_test"].append("✅ Posit Bedrock setup successful")
+            except ImportError:
+                from app.core.bedrock_setup import configure_bedrock_llm
+                llm = await configure_bedrock_llm()
+                debug_info["step_by_step_test"].append("✅ Standard Bedrock setup successful (Posit import failed)")
+        else:
+            from app.core.bedrock_setup import configure_bedrock_llm
+            llm = await configure_bedrock_llm()
+            debug_info["step_by_step_test"].append("✅ Standard Bedrock setup successful")
+        
+        debug_info["manual_test_results"]["llm_created"] = llm is not None
+        
+    except Exception as e:
+        debug_info["step_by_step_test"].append(f"❌ Bedrock LLM creation failed: {str(e)}")
+        debug_info["manual_test_results"]["llm_error"] = str(e)
+        return debug_info  # Stop here if LLM fails
+    
+    # Test 4: Can we create storage service?
+    try:
+        debug_info["step_by_step_test"].append("Testing storage service creation...")
+        
+        if config.is_mongodb_enabled():
+            debug_info["step_by_step_test"].append("Attempting MongoDB storage service...")
+            mongodb_config = config.get_mongodb_config()
+            test_storage = StorageService(
+                mongodb_connection_string=mongodb_config['connection_string'],
+                database_name=mongodb_config['database_name'],
+                collection_name=mongodb_config['collection_name']
+            )
+            debug_info["step_by_step_test"].append("✅ MongoDB storage service created")
+        else:
+            debug_info["step_by_step_test"].append("Attempting in-memory storage service...")
+            test_storage = StorageService()
+            debug_info["step_by_step_test"].append("✅ In-memory storage service created")
+        
+        debug_info["manual_test_results"]["storage_created"] = True
+        
+    except Exception as e:
+        debug_info["step_by_step_test"].append(f"❌ Storage service creation failed: {str(e)}")
+        debug_info["manual_test_results"]["storage_error"] = str(e)
+        test_storage = None
+    
+    # Test 5: Can we create document service?
+    try:
+        debug_info["step_by_step_test"].append("Testing document service creation...")
+        
+        test_doc_service = DocumentService(
+            llm=llm, 
+            storage_service=test_storage,
+            config=config
+        )
+        debug_info["step_by_step_test"].append("✅ Document service created")
+        debug_info["manual_test_results"]["document_service_created"] = True
+        
+    except Exception as e:
+        debug_info["step_by_step_test"].append(f"❌ Document service creation failed: {str(e)}")
+        debug_info["manual_test_results"]["document_service_error"] = str(e)
+    
+    # Test 6: Can we create other services?
+    try:
+        debug_info["step_by_step_test"].append("Testing query service creation...")
+        test_query_service = QueryService(llm=llm, storage_service=test_storage)
+        debug_info["step_by_step_test"].append("✅ Query service created")
+        
+        debug_info["step_by_step_test"].append("Testing chat service creation...")
+        test_chat_service = ChatService(
+            llm=llm, 
+            storage_service=test_storage, 
+            query_service=test_query_service
+        )
+        debug_info["step_by_step_test"].append("✅ Chat service created")
+        
+        debug_info["manual_test_results"]["all_services_created"] = True
+        
+    except Exception as e:
+        debug_info["step_by_step_test"].append(f"❌ Additional service creation failed: {str(e)}")
+        debug_info["manual_test_results"]["additional_services_error"] = str(e)
+    
+    # Summary
+    debug_info["summary"] = {
+        "can_create_services_manually": debug_info["manual_test_results"].get("all_services_created", False),
+        "likely_issue": "Manual creation works but lifespan/async initialization doesn't" if debug_info["manual_test_results"].get("all_services_created", False) else "Service creation fundamentally broken",
+        "recommendation": "Check lifespan function and async initialization logic" if debug_info["manual_test_results"].get("all_services_created", False) else "Fix service creation issues first"
+    }
+    
+    return debug_info
+
+@app.get("/debug/force-initialize-services")
+async def force_initialize_services():
+    """Force run the service initialization outside of lifespan."""
+    global document_service, query_service, storage_service, chat_service
+    global INITIALIZATION_COMPLETE, INITIALIZATION_ERROR, INITIALIZATION_STATUS
+    
+    result = {
+        "timestamp": datetime.now(),
+        "previous_state": {
+            "INITIALIZATION_COMPLETE": INITIALIZATION_COMPLETE,
+            "INITIALIZATION_STATUS": INITIALIZATION_STATUS,
+            "services_initialized": {
+                "document_service": document_service is not None,
+                "query_service": query_service is not None,
+                "storage_service": storage_service is not None,
+                "chat_service": chat_service is not None,
+            }
+        },
+        "initialization_steps": [],
+        "final_state": {},
+        "success": False
+    }
+    
+    try:
+        # Reset status
+        INITIALIZATION_STATUS = "manual_initialization"
+        INITIALIZATION_ERROR = None
+        result["initialization_steps"].append("Starting manual initialization...")
+        
+        # Get config
+        result["initialization_steps"].append("Loading configuration...")
+        if is_connect or is_workbench:
+            try:
+                from app.core.posit_config import get_posit_config
+                config = get_posit_config()
+                result["initialization_steps"].append("✅ Posit config loaded")
+            except ImportError:
+                from app.core.config import get_config
+                config = get_config()
+                result["initialization_steps"].append("✅ Standard config loaded (posit import failed)")
+        else:
+            from app.core.config import get_config
+            config = get_config()
+            result["initialization_steps"].append("✅ Standard config loaded")
+        
+        # Initialize LLM
+        result["initialization_steps"].append("Initializing Bedrock LLM...")
+        if is_connect or is_workbench:
+            try:
+                from app.core.posit_bedrock_setup import configure_bedrock_for_posit
+                llm = await configure_bedrock_for_posit()
+            except ImportError:
+                from app.core.bedrock_setup import configure_bedrock_llm
+                llm = await configure_bedrock_llm()
+        else:
+            from app.core.bedrock_setup import configure_bedrock_llm
+            llm = await configure_bedrock_llm()
+        
+        if not llm:
+            raise Exception("Failed to initialize Bedrock LLM")
+        result["initialization_steps"].append("✅ Bedrock LLM initialized")
+        
+        # Initialize storage service
+        result["initialization_steps"].append("Initializing storage service...")
+        try:
+            from app.services.storage_service import StorageService  # Add this import
+            
+            if config.is_mongodb_enabled():
+                mongodb_config = config.get_mongodb_config()
+                storage_service = StorageService(
+                    mongodb_connection_string=mongodb_config['connection_string'],
+                    database_name=mongodb_config['database_name'],
+                    collection_name=mongodb_config['collection_name']
+                )
+                result["initialization_steps"].append("✅ MongoDB storage service initialized")
+            else:
+                storage_service = StorageService()
+                result["initialization_steps"].append("✅ In-memory storage service initialized")
+        except ImportError as import_error:
+            result["initialization_steps"].append(f"❌ StorageService import failed: {str(import_error)}")
+            raise Exception(f"StorageService import failed: {str(import_error)}")
+            
+        
+        # Initialize services
+        result["initialization_steps"].append("Initializing document service...")
+        document_service = DocumentService(llm=llm, storage_service=storage_service, config=config)
+        result["initialization_steps"].append("✅ Document service initialized")
+        
+        result["initialization_steps"].append("Initializing query service...")
+        query_service = QueryService(llm=llm, storage_service=storage_service)
+        result["initialization_steps"].append("✅ Query service initialized")
+        
+        result["initialization_steps"].append("Initializing chat service...")
+        chat_service = ChatService(llm=llm, storage_service=storage_service, query_service=query_service)
+        result["initialization_steps"].append("✅ Chat service initialized")
+        
+        # Update global state
+        INITIALIZATION_COMPLETE = True
+        INITIALIZATION_STATUS = "complete"
+        result["initialization_steps"].append("✅ All services initialized successfully!")
+        result["success"] = True
+        
+    except Exception as e:
+        error_msg = f"Manual initialization failed: {str(e)}"
+        result["initialization_steps"].append(f"❌ {error_msg}")
+        INITIALIZATION_ERROR = error_msg
+        INITIALIZATION_STATUS = "failed"
+        result["success"] = False
+        result["error"] = str(e)
+    
+    # Final state
+    result["final_state"] = {
+        "INITIALIZATION_COMPLETE": INITIALIZATION_COMPLETE,
+        "INITIALIZATION_STATUS": INITIALIZATION_STATUS,
+        "INITIALIZATION_ERROR": INITIALIZATION_ERROR,
+        "services_initialized": {
+            "document_service": document_service is not None,
+            "query_service": query_service is not None,
+            "storage_service": storage_service is not None,
+            "chat_service": chat_service is not None,
+        }
+    }
+    
+    return result
 
 # For running directly
 if __name__ == "__main__":
