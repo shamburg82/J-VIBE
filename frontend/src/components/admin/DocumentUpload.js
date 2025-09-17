@@ -1,5 +1,3 @@
-// Enhanced DocumentUpload.js with comprehensive debugging
-
 import React, { useState, useCallback, useRef } from 'react';
 import { useNavigate } from 'react-router-dom';
 import {
@@ -53,7 +51,7 @@ const DocumentUpload = () => {
   
   // File and upload state
   const [selectedFiles, setSelectedFiles] = useState([]);
-  const [uploads, setUploads] = useState({});
+  const [uploads, setUploads] = useState({}); // documentId -> upload info
   const [isDragOver, setIsDragOver] = useState(false);
   const [error, setError] = useState(null);
   
@@ -125,16 +123,18 @@ const DocumentUpload = () => {
   };
 
   const validateForm = () => {
+    // Clear any previous errors
     setError(null);
     
+    // Trim whitespace for validation
     const trimmedCompound = compound.trim();
     const trimmedStudyId = studyId.trim();
     const trimmedDeliverable = deliverable.trim();
     
     console.log('Form validation:', {
-      compound: `"${trimmedCompound}" (${trimmedCompound.length} chars)`,
-      studyId: `"${trimmedStudyId}" (${trimmedStudyId.length} chars)`,
-      deliverable: `"${trimmedDeliverable}" (${trimmedDeliverable.length} chars)`,
+      compound: trimmedCompound,
+      studyId: trimmedStudyId,
+      deliverable: trimmedDeliverable,
       filesCount: selectedFiles.length
     });
     
@@ -295,6 +295,7 @@ const DocumentUpload = () => {
 
   const monitorProcessingStatus = async (fileId, documentId) => {
     try {
+      // Use Server-Sent Events for real-time updates
       const eventSource = apiService.createStatusStream(documentId);
 
       eventSource.onmessage = (event) => {
@@ -314,6 +315,7 @@ const DocumentUpload = () => {
             }
           }));
 
+          // Close stream when processing is complete
           if (statusData.status === 'completed' || statusData.status === 'failed') {
             eventSource.close();
           }
@@ -326,11 +328,14 @@ const DocumentUpload = () => {
       eventSource.onerror = (error) => {
         console.error('EventSource error:', error);
         eventSource.close();
+        
+        // Fallback to polling
         setTimeout(() => pollProcessingStatus(fileId, documentId), 2000);
       };
 
     } catch (err) {
       console.error('Monitoring setup error:', err);
+      // Fallback to polling
       pollProcessingStatus(fileId, documentId);
     }
   };
@@ -353,12 +358,14 @@ const DocumentUpload = () => {
           }
         }));
 
+        // Continue polling if still processing
         if (status.status !== 'completed' && status.status !== 'failed') {
           setTimeout(() => pollProcessingStatus(fileId, documentId), 3000);
         }
       }
     } catch (err) {
       console.error('Polling error:', err);
+      // Retry polling after delay
       setTimeout(() => pollProcessingStatus(fileId, documentId), 5000);
     }
   };
@@ -368,6 +375,7 @@ const DocumentUpload = () => {
 
     setError(null);
     
+    // Start uploads for all pending files
     const pendingFiles = selectedFiles.filter(f => !uploads[f.id] || uploads[f.id].status === 'pending');
     
     console.log(`Starting upload of ${pendingFiles.length} files`);
@@ -383,6 +391,7 @@ const DocumentUpload = () => {
         }
       }));
       
+      // Start upload (async - don't wait)
       startUpload(fileObj);
     }
   };
@@ -599,7 +608,7 @@ const DocumentUpload = () => {
               {isDragOver ? 'Drop files here' : 'Drop PDF files or click to browse'}
             </Typography>
             <Typography variant="body2" color="text.secondary">
-              Support for PDF files up to 50MB each. Maximum 10 files at once.
+              Support for PDF files up to 200MB each. Maximum 10 files at once.
             </Typography>
             
             <input
