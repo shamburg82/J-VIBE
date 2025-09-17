@@ -118,7 +118,7 @@ class PositConfig(Config):
             
         else:
             # Development settings (Workbench)
-            self.max_file_size_mb = int(os.getenv("MAX_FILE_SIZE_MB", "50"))
+            self.max_file_size_mb = int(os.getenv("MAX_FILE_SIZE_MB", "200"))
             self.max_concurrent_uploads = int(os.getenv("MAX_CONCURRENT_UPLOADS", "5"))
             self.log_level = "DEBUG"
             
