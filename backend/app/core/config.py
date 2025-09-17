@@ -50,7 +50,7 @@ class Config:
     # Application Settings
     development_mode: bool = True
     log_level: str = "INFO"
-    max_file_size_mb: int = 50
+    max_file_size_mb: int = 200
     base_storage_path: str = "//datastore/BU/RD/Restricted/DS/JazzVIBE/source_docs/study"
     
     # Processing Settings
@@ -146,7 +146,7 @@ def get_config() -> Config:
         # Application Settings
         development_mode=os.getenv("DEVELOPMENT_MODE", "true").lower() == "true",
         log_level=os.getenv("LOG_LEVEL", "INFO"),
-        max_file_size_mb=int(os.getenv("MAX_FILE_SIZE_MB", "50")),
+        max_file_size_mb=int(os.getenv("MAX_FILE_SIZE_MB", "200")),
         base_storage_path=Path(os.getenv("BASE_STORAGE_PATH", "//datastore/BU/RD/Restricted/DS/JazzVIBE/source_docs/study")),
 
         # Processing Settings
