@@ -193,7 +193,7 @@ function App() {
         }
         
       } catch (err) {
-        setError('Failed to connect to TLF Analyzer API');
+        setError('Failed to connect to Jazz VIBE API');
         console.error('App initialization error:', err);
       } finally {
         setIsLoading(false);
@@ -214,7 +214,7 @@ function App() {
           minHeight="100vh"
           bgcolor="background.default"
         >
-          <div>Loading TLF Analyzer...</div>
+          <div>Loading Jazz VIBE...</div>
         </Box>
       </ThemeProvider>
     );
