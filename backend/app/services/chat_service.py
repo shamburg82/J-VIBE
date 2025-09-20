@@ -6,6 +6,9 @@ import logging
 from datetime import datetime, timedelta
 import uuid
 
+# Need this for metadata filtering
+from llama_index.core.vector_stores import MetadataFilters, MetadataFilter
+
 from ..core.models import (
     ChatSession, ChatMessage, ChatRequest, ChatResponse, NewChatRequest,
     ChatSessionSummary, UpdateChatRequest, StreamingChatChunk, MessageRole
@@ -122,11 +125,37 @@ Analysis:"""
             if not vector_index:
                 raise ValueError(f"Document {session.document_id} not found")
             
-            # Retrieve relevant chunks using enhanced query
+            # Create metadata filters for document-specific retrieval
+            metadata_filters = MetadataFilters(
+                filters=[
+                    MetadataFilter(
+                        key="document_id",
+                        value=session.document_id,
+                        operator="=="
+                    )
+                ]
+            )
+            
+            # Retrieve relevant chunks using enhanced query with document filtering
             enhanced_query = self._enhance_query_with_context(request.message, conversation_context)
             relevant_chunks = await self.query_service._retrieve_relevant_chunks(
-                vector_index, enhanced_query, request.top_k, request.min_confidence
+                vector_index, enhanced_query, request.top_k, request.min_confidence,
+                metadata_filters=metadata_filters
             )
+            
+            # VERIFICATION: Ensure all chunks are from the correct document
+            if relevant_chunks:
+                doc_ids = [chunk.node.metadata.get("document_id", "unknown") for chunk in relevant_chunks]
+                unique_doc_ids = set(doc_ids)
+                logger.info(f"💬 Chat for document {session.document_id} retrieved chunks from: {unique_doc_ids}")
+                
+                # Filter out any wrong chunks as safety measure
+                correct_chunks = [chunk for chunk in relevant_chunks 
+                                if chunk.node.metadata.get("document_id") == session.document_id]
+                
+                if len(correct_chunks) != len(relevant_chunks):
+                    logger.warning(f"⚠️  Chat filtered {len(relevant_chunks) - len(correct_chunks)} wrong chunks")
+                    relevant_chunks = correct_chunks
             
             # Generate response with conversation context
             if not relevant_chunks:
@@ -199,12 +228,39 @@ Analysis:"""
             if request.include_context:
                 conversation_context = self._build_conversation_context(session)
             
-            # Get relevant chunks
+            # Get relevant chunks with document filtering
             vector_index = await self.storage_service.get_index(session.document_id)
+            
+            # Create metadata filters for streaming chat too
+            metadata_filters = MetadataFilters(
+                filters=[
+                    MetadataFilter(
+                        key="document_id",
+                        value=session.document_id,
+                        operator="=="
+                    )
+                ]
+            )
+            
             enhanced_query = self._enhance_query_with_context(request.message, conversation_context)
             relevant_chunks = await self.query_service._retrieve_relevant_chunks(
-                vector_index, enhanced_query, request.top_k, request.min_confidence
+                vector_index, enhanced_query, request.top_k, request.min_confidence,
+                metadata_filters=metadata_filters
             )
+            
+            # VERIFICATION: Check document filtering for streaming chat
+            if relevant_chunks:
+                doc_ids = [chunk.node.metadata.get("document_id", "unknown") for chunk in relevant_chunks]
+                unique_doc_ids = set(doc_ids)
+                logger.info(f"💬 Streaming chat for document {session.document_id} retrieved chunks from: {unique_doc_ids}")
+                
+                # Filter out any wrong chunks
+                correct_chunks = [chunk for chunk in relevant_chunks 
+                                if chunk.node.metadata.get("document_id") == session.document_id]
+                
+                if len(correct_chunks) != len(relevant_chunks):
+                    logger.warning(f"⚠️  Streaming chat filtered {len(relevant_chunks) - len(correct_chunks)} wrong chunks")
+                    relevant_chunks = correct_chunks
             
             if not relevant_chunks:
                 # No relevant data found
