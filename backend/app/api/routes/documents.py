@@ -1,4 +1,4 @@
-# backend/app/api/routes/documents.py (Complete working version)
+# backend/app/api/routes/documents.py
 from fastapi import APIRouter, HTTPException, Depends, UploadFile, File, BackgroundTasks, Form, Request
 from fastapi.responses import Response, StreamingResponse, FileResponse
 from typing import List, Optional, AsyncGenerator
@@ -19,15 +19,19 @@ router = APIRouter()
 logger = logging.getLogger(__name__)
 
 # Working dependency function
-def get_document_service():
+async def get_document_service():
     """Get document service from main module."""
     import main
-    return main.get_document_service()
+    # Ensure services are initialized
+    await main.service_manager.ensure_initialized()
+    return main.service_manager.document_service
 
-def get_storage_service():
-    """Get storage service from main module.""" 
+async def get_storage_service():
+    """Get storage service from main module."""
     import main
-    return main.get_storage_service()
+    # Ensure services are initialized
+    await main.service_manager.ensure_initialized()
+    return main.service_manager.storage_service
 
 @router.post("/upload", response_model=ProcessingStatus)
 async def upload_document(
@@ -289,6 +293,7 @@ async def get_document_info(
         raise
     except Exception as e:
         logger.error(f"Error getting document info for {document_id}: {e}")
+        raise HTTPException(status_code=500, detail=f"Failed to get document info: {str(e)}")
 
 @router.get("/structure")
 async def get_documents_structure(
@@ -634,142 +639,3 @@ async def check_document_chat_ready(
     except Exception as e:
         logger.error(f"Error checking chat readiness for document {document_id}: {e}")
         raise HTTPException(status_code=500, detail=str(e))
-
-# Debug endpoint to test form data reception
-@router.post("/upload-test")
-async def upload_test(
-    request: Request
-):
-    """Test endpoint to debug form data reception."""
-    
-    try:
-        logger.info("=== UPLOAD TEST REQUEST ===")
-        
-        # Get headers
-        headers = dict(request.headers)
-        logger.info(f"Headers: {headers}")
-        
-        # Get form data
-        form = await request.form()
-        
-        result = {
-            "content_type": request.headers.get("content-type"),
-            "method": request.method,
-            "url": str(request.url),
-            "form_fields": {},
-            "files": {},
-            "validation_results": {}
-        }
-        
-        # Process each form field
-        for key, value in form.items():
-            if hasattr(value, 'filename'):  # File field
-                result["files"][key] = {
-                    "filename": value.filename,
-                    "content_type": value.content_type,
-                    "size": value.size if hasattr(value, 'size') else "unknown"
-                }
-                logger.info(f"File field '{key}': {value.filename}")
-            else:  # Text field
-                str_value = str(value)
-                result["form_fields"][key] = {
-                    "value": str_value,
-                    "length": len(str_value),
-                    "stripped_length": len(str_value.strip()),
-                    "is_empty": not str_value.strip(),
-                    "type": type(value).__name__
-                }
-                logger.info(f"Text field '{key}': '{str_value}' (len: {len(str_value)})")
-        
-        # Test validation
-        compound = form.get('compound', '')
-        study_id = form.get('study_id', '')
-        deliverable = form.get('deliverable', '')
-        
-        result["validation_results"] = {
-            "compound_valid": bool(str(compound).strip()),
-            "study_id_valid": bool(str(study_id).strip()),
-            "deliverable_valid": bool(str(deliverable).strip()),
-            "compound_value": str(compound),
-            "study_id_value": str(study_id),
-            "deliverable_value": str(deliverable)
-        }
-        
-        logger.info(f"Validation results: {result['validation_results']}")
-        logger.info("=== END UPLOAD TEST ===")
-        
-        return result
-        
-    except Exception as e:
-        logger.error(f"Test endpoint error: {e}")
-        logger.exception("Test endpoint exception:")
-        return {
-            "error": str(e),
-            "type": type(e).__name__
-        }
-
-# Alternative upload endpoint using different parameter handling
-@router.post("/upload-alt")
-async def upload_document_alternative(
-    background_tasks: BackgroundTasks,
-    file: UploadFile = File(...),
-    compound: str = Form(..., description="Compound identifier"),
-    study_id: str = Form(..., description="Study identifier"),
-    deliverable: str = Form(..., description="Deliverable type"),
-    description: Optional[str] = Form(None, description="Optional description"),
-    document_service=Depends(get_document_service)
-):
-    """Alternative upload endpoint with stricter form validation."""
-    
-    logger.info("=== ALTERNATIVE UPLOAD ===")
-    logger.info(f"Received: compound='{compound}', study_id='{study_id}', deliverable='{deliverable}'")
-    
-    # This version should work if the form data is being sent correctly
-    # because FastAPI will validate that the required Form fields are present
-    
-    try:
-        # Validate non-empty after stripping
-        compound = compound.strip()
-        study_id = study_id.strip() 
-        deliverable = deliverable.strip()
-        
-        if not compound:
-            raise HTTPException(status_code=400, detail="Compound cannot be empty")
-        if not study_id:
-            raise HTTPException(status_code=400, detail="Study ID cannot be empty")
-        if not deliverable:
-            raise HTTPException(status_code=400, detail="Deliverable cannot be empty")
-            
-        # Same processing as main endpoint...
-        document_id = str(uuid.uuid4())
-        file_content = await file.read()
-        
-        if not file_content:
-            raise HTTPException(status_code=400, detail="File is empty")
-            
-        status = ProcessingStatus(
-            document_id=document_id,
-            status="queued", 
-            progress=0,
-            message="Document uploaded via alternative endpoint",
-            created_at=datetime.now(),
-            updated_at=datetime.now()
-        )
-        
-        background_tasks.add_task(
-            document_service.process_document_async,
-            document_id=document_id,
-            file_content=file_content,
-            filename=file.filename,
-            compound=compound,
-            study_id=study_id,
-            deliverable=deliverable,
-            description=description.strip() if description else None
-        )
-        
-        logger.info(f"✅ Alternative upload successful: {document_id}")
-        return status
-        
-    except Exception as e:
-        logger.error(f"❌ Alternative upload failed: {e}")
-        raise
