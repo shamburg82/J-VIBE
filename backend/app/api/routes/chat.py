@@ -1,4 +1,4 @@
-# backend/app/api/routes/chat.py (Complete working version)
+# backend/app/api/routes/chat.py
 from fastapi import APIRouter, HTTPException, Depends
 from fastapi.responses import StreamingResponse
 from typing import List, Optional, AsyncGenerator
@@ -14,11 +14,13 @@ from ...core.models import (
 router = APIRouter()
 logger = logging.getLogger(__name__)
 
-# Working dependency function
-def get_chat_service():
+# Dependency function with async
+async def get_chat_service():
     """Get chat service from main module."""
     import main
-    return main.get_chat_service()
+    # Ensure services are initialized
+    await main.service_manager.ensure_initialized()
+    return main.service_manager.chat_service
 
 @router.post("/new", response_model=ChatSession)
 async def create_new_chat(
@@ -110,7 +112,7 @@ async def send_chat_message_stream_get(
         }
     )
 
-# **ALTERNATIVE: POST version for streaming (more RESTful)**
+# POST version for streaming (more RESTful)
 @router.post("/message-stream")
 async def send_chat_message_stream_post(
     request: ChatRequest,
@@ -378,7 +380,7 @@ async def quick_start_chat_stream(
     
     return StreamingResponse(
         generate_quick_start_stream(),
-        media_type="text/plain",
+        media_type="text/event-stream",
         headers={
             "Cache-Control": "no-cache",
             "Connection": "keep-alive",
