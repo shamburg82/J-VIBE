@@ -471,22 +471,6 @@ export const apiService = {
     return eventSource;
   },
 
-  // Check if document is ready for chat
-  async checkDocumentChatReady(documentId) {
-    try {
-      const response = await api.get(`/documents/info/${documentId}`);
-      return {
-        chat_ready: response.data.status === 'completed',
-        message: response.data.status === 'completed' ? 'Ready for chat' : `Document status: ${response.data.status}`
-      };
-    } catch (error) {
-      return {
-        chat_ready: false,
-        message: 'Unable to check document status'
-      };
-    }
-  },
-
   // Get chat examples (mock for now)
   async getChatExamples() {
     return {
@@ -595,18 +579,40 @@ export const apiService = {
       throw error;
     }
   },
-
+  
   // Check if document is ready for chat
   async checkDocumentChatReady(documentId) {
     try {
+      // Use the proper endpoint that checks vector index
       const response = await api.get(`/documents/chat-ready/${documentId}`);
       return response.data;
     } catch (error) {
       console.warn('Could not check chat readiness:', error);
-      return {
-        chat_ready: false,
-        message: 'Unable to check chat status'
-      };
+      
+      // Fallback: try to get document info
+      try {
+        const docInfo = await this.getDocumentInfo(documentId);
+        return {
+          chat_ready: docInfo.status === 'completed',
+          status: docInfo.status,
+          message: docInfo.status === 'completed' ? 
+            'Document ready for chat' : 
+            `Document status: ${docInfo.status}`,
+          document_info: {
+            filename: docInfo.filename,
+            total_pages: docInfo.total_pages,
+            total_chunks: docInfo.total_chunks,
+            tlf_outputs_found: docInfo.tlf_outputs_found
+          }
+        };
+      } catch (fallbackError) {
+        console.error('Fallback also failed:', fallbackError);
+        return {
+          chat_ready: false,
+          status: 'error',
+          message: 'Unable to check chat status'
+        };
+      }
     }
   },
   
