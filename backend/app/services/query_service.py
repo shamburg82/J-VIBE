@@ -1,4 +1,4 @@
-# backend/app/services/query_service.py - Enhanced version with better source extraction
+# backend/app/services/query_service.py
 from typing import List, Dict, Optional, Any, AsyncGenerator
 import asyncio
 import time
@@ -60,10 +60,43 @@ Analysis:"""
             if not vector_index:
                 raise Exception(f"Document {request.document_id} not found or not processed")
             
-            # Retrieve relevant chunks
-            relevant_chunks = await self._retrieve_relevant_chunks(
-                vector_index, request.query, request.top_k, request.min_confidence
+            # Create metadata filters to only retrieve from this document
+            metadata_filters = MetadataFilters(
+                filters=[
+                    MetadataFilter(
+                        key="document_id",
+                        value=request.document_id,
+                        operator="=="
+                    )
+                ]
             )
+            
+            # Retrieve relevant chunks with document filter
+            relevant_chunks = await self._retrieve_relevant_chunks(
+                vector_index, request.query, request.top_k, request.min_confidence,
+                metadata_filters=metadata_filters
+            )
+            
+            # VERIFICATION: Log which documents the chunks came from
+            if relevant_chunks:
+                doc_ids = [chunk.node.metadata.get("document_id", "unknown") for chunk in relevant_chunks]
+                unique_doc_ids = set(doc_ids)
+                logger.info(f"🔍 Query for document {request.document_id} returned chunks from: {unique_doc_ids}")
+                
+                # CRITICAL CHECK: Ensure all chunks are from the requested document
+                wrong_doc_chunks = [chunk for chunk in relevant_chunks 
+                                  if chunk.node.metadata.get("document_id") != request.document_id]
+                
+                if wrong_doc_chunks:
+                    logger.error(f"❌ CRITICAL: {len(wrong_doc_chunks)} chunks from wrong documents!")
+                    for i, chunk in enumerate(wrong_doc_chunks[:3]):  # Show first 3 wrong chunks
+                        chunk_doc_id = chunk.node.metadata.get("document_id", "unknown")
+                        logger.error(f"   Wrong chunk {i}: expected '{request.document_id}', got '{chunk_doc_id}'")
+                    
+                    # Filter out wrong chunks as a safety measure
+                    relevant_chunks = [chunk for chunk in relevant_chunks 
+                                     if chunk.node.metadata.get("document_id") == request.document_id]
+                    logger.info(f"✅ Filtered to {len(relevant_chunks)} correct chunks")
             
             if not relevant_chunks:
                 response_text = f"No relevant clinical trial data found for query: '{request.query}'. Try using broader search terms or lowering the confidence threshold."
@@ -102,7 +135,7 @@ Analysis:"""
         """Process query with streaming response and enhanced sources."""
         
         try:
-            # Get relevant chunks first
+            # Get relevant chunks first with document filtering
             vector_index = await self.storage_service.get_index(request.document_id)
             if not vector_index:
                 yield StreamingQueryChunk(
@@ -111,9 +144,35 @@ Analysis:"""
                 )
                 return
             
-            relevant_chunks = await self._retrieve_relevant_chunks(
-                vector_index, request.query, request.top_k, request.min_confidence
+            # Create metadata filters for streaming queries too
+            metadata_filters = MetadataFilters(
+                filters=[
+                    MetadataFilter(
+                        key="document_id",
+                        value=request.document_id,
+                        operator="=="
+                    )
+                ]
             )
+            
+            relevant_chunks = await self._retrieve_relevant_chunks(
+                vector_index, request.query, request.top_k, request.min_confidence,
+                metadata_filters=metadata_filters
+            )
+            
+            # VERIFICATION: Check document filtering for streaming queries
+            if relevant_chunks:
+                doc_ids = [chunk.node.metadata.get("document_id", "unknown") for chunk in relevant_chunks]
+                unique_doc_ids = set(doc_ids)
+                logger.info(f"🔍 Streaming query for document {request.document_id} returned chunks from: {unique_doc_ids}")
+                
+                # Filter out any wrong chunks
+                correct_chunks = [chunk for chunk in relevant_chunks 
+                                if chunk.node.metadata.get("document_id") == request.document_id]
+                
+                if len(correct_chunks) != len(relevant_chunks):
+                    logger.warning(f"⚠️  Filtered {len(relevant_chunks) - len(correct_chunks)} wrong chunks in streaming query")
+                    relevant_chunks = correct_chunks
             
             if not relevant_chunks:
                 yield StreamingQueryChunk(
@@ -240,11 +299,15 @@ Analysis:"""
         min_confidence: float,
         metadata_filters: Optional[MetadataFilters] = None
     ) -> List[Any]:
-        """Retrieve relevant chunks from vector index."""
+        """Retrieve relevant chunks from vector index with document filtering."""
         
         from llama_index.core.retrievers import VectorIndexRetriever
         
-        # Create retriever
+        # Always include document_id filter if not provided
+        if metadata_filters is None:
+            logger.warning("⚠️  No metadata filters provided to _retrieve_relevant_chunks - this may return wrong documents!")
+        
+        # Create retriever with filters
         retriever = VectorIndexRetriever(
             index=vector_index,
             similarity_top_k=top_k * 2,  # Get extra for filtering
@@ -253,6 +316,36 @@ Analysis:"""
         
         # Retrieve results
         results = retriever.retrieve(query)
+        
+        # ADDITIONAL SAFETY: Double-check that all results have correct document_id
+        if metadata_filters:
+            # Extract the expected document_id from filters
+            expected_doc_id = None
+            for filter_item in metadata_filters.filters:
+                if filter_item.key == "document_id":
+                    expected_doc_id = filter_item.value
+                    break
+            
+            if expected_doc_id:
+                # Verify all results are from the correct document
+                correct_results = []
+                wrong_results = []
+                
+                for result in results:
+                    result_doc_id = result.node.metadata.get("document_id")
+                    if result_doc_id == expected_doc_id:
+                        correct_results.append(result)
+                    else:
+                        wrong_results.append(result)
+                
+                if wrong_results:
+                    logger.error(f"❌ Vector retriever returned {len(wrong_results)} chunks from wrong documents!")
+                    logger.error(f"   Expected: {expected_doc_id}")
+                    wrong_doc_ids = [r.node.metadata.get("document_id", "unknown") for r in wrong_results]
+                    logger.error(f"   Got: {set(wrong_doc_ids)}")
+                
+                results = correct_results
+                logger.info(f"✅ Document filtering: {len(correct_results)} correct chunks, {len(wrong_results)} filtered out")
         
         # Filter by confidence
         filtered_results = []
@@ -272,6 +365,7 @@ Analysis:"""
             pass
         
         return filtered_results[:top_k]
+
 
     def _prepare_context(self, results: List[Any]) -> str:
         """Prepare context string with better formatting for clinical data."""
@@ -467,36 +561,32 @@ Content:
             if not vector_index:
                 return None
             
-            # Get all nodes from the vector store
+            # Get all nodes from the vector store WITH DOCUMENT FILTERING
             nodes = []
             try:
-                # Try to get nodes directly from the index
-                if hasattr(vector_index, '_vector_store'):
-                    # For in-memory vector stores
-                    vector_store = vector_index._vector_store
-                    if hasattr(vector_store, '_data') and hasattr(vector_store._data, 'embedding_dict'):
-                        # Get all node IDs and retrieve the nodes
-                        node_ids = list(vector_store._data.embedding_dict.keys())
-                        nodes = [vector_store._data.doc_store.get_document(node_id) for node_id in node_ids]
-                    elif hasattr(vector_store, 'get_nodes'):
-                        nodes = vector_store.get_nodes()
-                elif hasattr(vector_index, 'docstore'):
-                    # Alternative approach through docstore
-                    doc_store = vector_index.docstore
-                    if hasattr(doc_store, 'docs'):
-                        nodes = list(doc_store.docs.values())
-            except Exception as e:
-                logger.warning(f"Could not extract nodes directly, using retrieval approach: {e}")
-                
-                # Fallback: Use retrieval to sample nodes
+                # When analyzing available sources, filter by document_id
                 from llama_index.core.retrievers import VectorIndexRetriever
-                retriever = VectorIndexRetriever(
-                    index=vector_index,
-                    similarity_top_k=100  # Get a large sample
+                
+                # Create metadata filters for this specific document
+                metadata_filters = MetadataFilters(
+                    filters=[
+                        MetadataFilter(
+                            key="document_id",
+                            value=document_id,
+                            operator="=="
+                        )
+                    ]
                 )
                 
-                # Use broad search terms to get diverse results
-                search_terms = ["table", "data", "analysis", "results", "clinical"]
+                # Use retrieval to get a large sample of nodes from this document only
+                retriever = VectorIndexRetriever(
+                    index=vector_index,
+                    similarity_top_k=200,  # Get a large sample
+                    filters=metadata_filters
+                )
+                
+                # Use broad search terms to get diverse results from this document
+                search_terms = ["table", "data", "analysis", "results", "clinical", "listing", "figure", "demographic", "adverse", "efficacy"]
                 retrieved_nodes = []
                 
                 for term in search_terms:
@@ -506,11 +596,41 @@ Content:
                     except:
                         continue
                 
-                nodes = retrieved_nodes
+                # Remove duplicates by node ID
+                seen_ids = set()
+                unique_nodes = []
+                for node in retrieved_nodes:
+                    node_id = getattr(node, 'id_', str(id(node)))
+                    if node_id not in seen_ids:
+                        seen_ids.add(node_id)
+                        unique_nodes.append(node)
+                
+                nodes = unique_nodes
+                logger.info(f"📊 Retrieved {len(nodes)} unique nodes for document {document_id} source analysis")
+                
+            except Exception as e:
+                logger.warning(f"Could not extract nodes for document {document_id}: {e}")
+                return None
             
             if not nodes:
                 logger.warning(f"No nodes found for document {document_id}")
                 return None
+            
+            # VERIFICATION: Check that all nodes are actually from the requested document
+            wrong_doc_nodes = []
+            correct_doc_nodes = []
+            
+            for node in nodes:
+                node_doc_id = node.metadata.get("document_id")
+                if node_doc_id == document_id:
+                    correct_doc_nodes.append(node)
+                else:
+                    wrong_doc_nodes.append(node)
+            
+            if wrong_doc_nodes:
+                logger.error(f"❌ CRITICAL: {len(wrong_doc_nodes)} nodes from wrong documents in source analysis!")
+                nodes = correct_doc_nodes
+                logger.info(f"✅ Filtered to {len(nodes)} correct nodes")
             
             # Extract unique values from node metadata with enhanced page detection
             tlf_types = set()
