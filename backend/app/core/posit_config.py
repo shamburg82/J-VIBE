@@ -90,7 +90,7 @@ class PositConfig(Config):
         self.mongodb_password = os.getenv("MONGODB_PASSWORD")
         
         # MongoDB database and collection settings
-        self.mongodb_database_name = os.getenv("MONGODB_DATABASE_NAME", "jazzvibe")
+        self.mongodb_database_name = os.getenv("MONGODB_DATABASE_NAME", "default_db")
         self.mongodb_collection_name = os.getenv("MONGODB_COLLECTION_NAME", "vector_store")
         
 
