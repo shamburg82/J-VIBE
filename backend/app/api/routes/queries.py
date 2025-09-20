@@ -1,4 +1,4 @@
-# backend/app/api/routes/queries.py (Complete working version)
+# backend/app/api/routes/queries.py
 from fastapi import APIRouter, HTTPException, Depends
 from fastapi.responses import StreamingResponse
 from typing import List, Optional, AsyncGenerator
@@ -15,11 +15,13 @@ from ...core.models import (
 router = APIRouter()
 logger = logging.getLogger(__name__)
 
-# Working dependency function
-def get_query_service():
+# Dependency function with async
+async def get_query_service():
     """Get query service from main module."""
     import main
-    return main.get_query_service()
+    # Ensure services are initialized
+    await main.service_manager.ensure_initialized()
+    return main.service_manager.query_service
 
 @router.post("/ask", response_model=QueryResponse)
 async def query_document(
@@ -69,7 +71,7 @@ async def query_document_stream(
     
     return StreamingResponse(
         generate_query_stream(),
-        media_type="text/plain",
+        media_type="text/event-stream",
         headers={
             "Cache-Control": "no-cache",
             "Connection": "keep-alive",
