@@ -70,7 +70,7 @@ class Config:
     
     # MongoDB Settings
     mongodb_connection_string: Optional[str] = None
-    mongodb_database_name: str = "jazzvibe"
+    mongodb_database_name: str = "default_db"
     mongodb_collection_name: str = "vector_store"
     mongodb_host: str = "na2-dsejazzvibe01-pl-0.os021j.mongodb.net"
     mongodb_username: Optional[str] = None
@@ -160,7 +160,7 @@ def get_config() -> Config:
         
         # MongoDB Settings
         mongodb_connection_string=os.getenv("MONGODB_CONNECTION_STRING") or os.getenv("MONGODB_URI"),
-        mongodb_database_name=os.getenv("MONGODB_DATABASE_NAME", "jazzvibe"),
+        mongodb_database_name=os.getenv("MONGODB_DATABASE_NAME", "default_db"),
         mongodb_collection_name=os.getenv("MONGODB_COLLECTION_NAME", "vector_store"),
         mongodb_host=os.getenv("MONGODB_HOST", "na2-dsejazzvibe01-pl-0.os021j.mongodb.net"),
         mongodb_username=os.getenv("MONGODB_USERNAME"),
