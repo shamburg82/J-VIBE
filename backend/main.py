@@ -244,16 +244,32 @@ def detect_connect_path() -> str:
         from urllib.parse import urlparse
         parsed = urlparse(connect_url)
         
-        if '/content/' in parsed.path:
-            content_match = re.search(r'(/content/[^/]+)', parsed.path)
+        # Extract the path component
+        path = parsed.path
+        
+        # Handle different Connect URL patterns
+        if '/content/' in path:
+            # Extract the content path including GUID
+            content_match = re.search(r'(/content/[a-f0-9-]+)', path)
             if content_match:
                 root_path = content_match.group(1)
                 logger.info(f"✅ Detected Connect content path: {root_path}")
                 return root_path
-        elif parsed.path and parsed.path != '/':
-            root_path = parsed.path.rstrip('/')
-            logger.info(f"✅ Detected Connect vanity path: {root_path}")
-            return root_path
+        
+        # Handle vanity URLs - the path might be just /jazzvibe or similar
+        elif path and path != '/':
+            # For vanity URLs, we need the actual content path
+            # Check if there's a __rsconnect_bundle_id environment variable
+            bundle_id = os.getenv("RSTUDIO_CONNECT_BUNDLE_ID")
+            if bundle_id:
+                # Construct the content path from bundle ID
+                root_path = f"/content/{bundle_id}"
+                logger.info(f"✅ Constructed content path from bundle ID: {root_path}")
+                return root_path
+            else:
+                # Use the vanity path as-is, but the backend needs to know the content path
+                logger.warning(f"⚠️  Vanity URL detected ({path}) but no bundle ID found")
+                return path.rstrip('/')
         
         logger.warning(f"⚠️  Could not extract path from Connect URL: {connect_url}")
         return ""
@@ -373,23 +389,42 @@ class ReactFallbackMiddleware(BaseHTTPMiddleware):
         with open(index_file, 'r', encoding='utf-8') as f:
             html_content = f.read()
         
-        if root_path:
-            html_content = html_content.replace('href="./static/', f'href="{root_path}/static/')
-            html_content = html_content.replace('src="./static/', f'src="{root_path}/static/')
-            html_content = html_content.replace('href="/static/', f'href="{root_path}/static/')
-            html_content = html_content.replace('src="/static/', f'src="{root_path}/static/')
-            html_content = html_content.replace('href="./manifest.json"', f'href="{root_path}/manifest.json"')
-            html_content = html_content.replace('href="./favicon.ico"', f'href="{root_path}/favicon.ico"')
-            html_content = html_content.replace('%PUBLIC_URL%', root_path)
+        # Determine the actual content path for Connect
+        actual_base_path = root_path
+        
+        # For Connect, ensure we're using the content path
+        if is_connect:
+            # Try to get the actual content GUID
+            connect_url = os.getenv("RSTUDIO_CONNECT_URL", "")
+            if '/content/' in connect_url:
+                content_match = re.search(r'/content/([a-f0-9-]+)', connect_url)
+                if content_match:
+                    actual_base_path = f"/content/{content_match.group(1)}"
+            elif os.getenv("RSTUDIO_CONNECT_BUNDLE_ID"):
+                # Use bundle ID if available
+                actual_base_path = f"/content/{os.getenv('RSTUDIO_CONNECT_BUNDLE_ID')}"
+        
+        if actual_base_path:
+            # Update static file paths
+            html_content = html_content.replace('href="./static/', f'href="{actual_base_path}/static/')
+            html_content = html_content.replace('src="./static/', f'src="{actual_base_path}/static/')
+            html_content = html_content.replace('href="/static/', f'href="{actual_base_path}/static/')
+            html_content = html_content.replace('src="/static/', f'src="{actual_base_path}/static/')
+            html_content = html_content.replace('href="./manifest.json"', f'href="{actual_base_path}/manifest.json"')
+            html_content = html_content.replace('href="./favicon.ico"', f'href="{actual_base_path}/favicon.ico"')
+            html_content = html_content.replace('%PUBLIC_URL%', actual_base_path)
             
+            # Add base tag if not present
             if '<base href=' not in html_content:
-                base_tag = f'<base href="{root_path}/">'
+                base_tag = f'<base href="{actual_base_path}/">'
                 html_content = html_content.replace('<head>', f'<head>\n    {base_tag}')
             
+            # Inject the actual content path for the frontend to use
             js_injection = f'''
     <script>
-      window.__POSIT_BASE_PATH__ = '{root_path}';
+      window.__POSIT_BASE_PATH__ = '{actual_base_path}';
       window.__POSIT_ENVIRONMENT__ = '{"connect" if is_connect else "workbench" if is_workbench else "local"}';
+      window.__POSIT_CONNECT_URL__ = '{os.getenv("RSTUDIO_CONNECT_URL", "")}';
     </script>'''
             
             if '</head>' in html_content:
@@ -486,6 +521,7 @@ async def health_check():
         overall_health = "unhealthy"
     
     return {
+        "received_by": "backend/main.py",
         "status": overall_health,
         "initialization": status,
         "environment": {
